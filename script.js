@@ -85,114 +85,258 @@ function isConnectionSafe(fromId, toId, nodes, existingConnections) {
     return true;
 }
 
-// Генерация случайного графа с минимальным остовным деревом и безопасными доп. связями
-function generateRandomNetwork() {
+// --- MST (Крускал) ---
+function buildMST(nodes) {
+    const nodeIds = Object.keys(nodes);
+    // Собираем все возможные рёбра
+    let edges = [];
+    for (let i = 0; i < nodeIds.length; i++) {
+        for (let j = i + 1; j < nodeIds.length; j++) {
+            const a = nodeIds[i], b = nodeIds[j];
+            const dist = getDistance(nodes[a].x, nodes[a].y, nodes[b].x, nodes[b].y);
+            edges.push({ a, b, dist });
+        }
+    }
+    edges.sort((e1, e2) => e1.dist - e2.dist);
+    // Крускал
+    class DSU {
+        constructor(ids) { this.p = {}; ids.forEach(x => this.p[x] = x); }
+        find(x) { return this.p[x] === x ? x : (this.p[x] = this.find(this.p[x])); }
+        union(x, y) { this.p[this.find(x)] = this.find(y); }
+        connected(x, y) { return this.find(x) === this.find(y); }
+    }
+    const dsu = new DSU(nodeIds);
+    let mst = [];
+    for (const { a, b } of edges) {
+        if (!dsu.connected(a, b)) {
+            mst.push([a, b]);
+            dsu.union(a, b);
+        }
+    }
+    return mst;
+}
+
+function generateSmartOrganicNetwork() {
     const nodes = {};
     const nodeCount = Math.floor(Math.random() * 11) + 25; // 25-35
     // HUB в центре
     const hub = new Node(canvas.width / 2, canvas.height / 2, 'hub', 'hub');
     nodes['hub'] = hub;
-    // Остальные ноды
+    let connections = [];
+    // 1. Случайно размещаем остальные ноды без наложений
     for (let i = 0; i < nodeCount - 1; i++) {
-        const pos = generateRandomPosition(nodes);
+        let pos;
+        let attempts = 0;
+        do {
+            pos = generateRandomPosition(nodes);
+            attempts++;
+        } while ((isNodeOverlapping(pos.x, pos.y, nodes, 80) || isNodeNearEdge(pos.x, pos.y, nodes, connections, 60)) && attempts < 100);
         const node = new Node(pos.x, pos.y, 'node' + i, 'data');
         nodes[node.id] = node;
     }
-    // Минимальное остовное дерево (случайное присоединение)
-    const nodeIds = Object.keys(nodes);
-    let connected = ['hub'];
-    let unconnected = nodeIds.filter(id => id !== 'hub');
-    let connections = [];
-    while (unconnected.length > 0) {
-        const from = connected[Math.floor(Math.random() * connected.length)];
-        const to = unconnected[Math.floor(Math.random() * unconnected.length)];
-        nodes[from].addNeighbor(to);
-        nodes[to].addNeighbor(from);
-        connections.push([from, to]);
-        connected.push(to);
-        unconnected = unconnected.filter(id => id !== to);
-    }
-    // Добавляем несколько случайных безопасных связей
-    const maxExtra = Math.floor(nodeCount * 0.3);
-    let added = 0;
-    for (let attempt = 0; attempt < 100 && added < maxExtra; attempt++) {
-        const a = nodeIds[Math.floor(Math.random() * nodeIds.length)];
-        const b = nodeIds[Math.floor(Math.random() * nodeIds.length)];
-        if (a === b) continue;
-        if (nodes[a].neighbors.includes(b)) continue;
-        if (!isConnectionSafe(a, b, nodes, connections)) continue;
+    // 2. Строим MST (гарантированная связность)
+    const mst = buildMST(nodes);
+    for (const [a, b] of mst) {
         nodes[a].addNeighbor(b);
         nodes[b].addNeighbor(a);
         connections.push([a, b]);
-        added++;
+    }
+    // 3. Добавляем дополнительные безопасные связи для органичности
+    const nodeIds = Object.keys(nodes);
+    let extraEdges = [];
+    for (let i = 0; i < nodeIds.length; i++) {
+        for (let j = i + 1; j < nodeIds.length; j++) {
+            const a = nodeIds[i], b = nodeIds[j];
+            if (nodes[a].neighbors.includes(b)) continue;
+            const dist = getDistance(nodes[a].x, nodes[a].y, nodes[b].x, nodes[b].y);
+            if (dist > 120 && dist < 320) { // не слишком близко, не слишком далеко
+                // Проверка на пересечение
+                let ok = true;
+                for (const [c, d] of connections) {
+                    if (doLinesIntersect(
+                        nodes[a].x, nodes[a].y, nodes[b].x, nodes[b].y,
+                        nodes[c].x, nodes[c].y, nodes[d].x, nodes[d].y
+                    )) { ok = false; break; }
+                }
+                if (ok) extraEdges.push({ a, b, dist });
+            }
+        }
+    }
+    // Добавляем часть дополнительных связей
+    extraEdges.sort((e1, e2) => e1.dist - e2.dist);
+    let added = 0;
+    for (const { a, b } of extraEdges) {
+        if (!nodes[a].neighbors.includes(b) && added < nodeCount * 0.5) {
+            nodes[a].addNeighbor(b);
+            nodes[b].addNeighbor(a);
+            connections.push([a, b]);
+            added++;
+        }
     }
     return nodes;
 }
 
-game_state.nodes = generateRandomNetwork();
+function generateOrganicNetwork() {
+    const nodes = {};
+    const nodeCount = Math.floor(Math.random() * 11) + 25; // 25-35
+    // HUB в центре
+    const hub = new Node(canvas.width / 2, canvas.height / 2, 'hub', 'hub');
+    nodes['hub'] = hub;
+    let connections = [];
+    // 1. Случайно размещаем остальные ноды без наложений и без близости к пересечениям
+    for (let i = 0; i < nodeCount - 1; i++) {
+        let pos;
+        let attempts = 0;
+        do {
+            pos = generateRandomPosition(nodes);
+            attempts++;
+        } while ((isNodeOverlapping(pos.x, pos.y, nodes, 60)) && attempts < 100);
+        const node = new Node(pos.x, pos.y, 'node' + i, 'data');
+        nodes[node.id] = node;
+    }
+    const nodeIds = Object.keys(nodes);
+    // 2. Для каждой ноды соединяем с 2 ближайшими (если нет пересечений)
+    for (const id of nodeIds) {
+        let dists = [];
+        for (const other of nodeIds) {
+            if (id === other) continue;
+            dists.push({ id: other, dist: getDistance(nodes[id].x, nodes[id].y, nodes[other].x, nodes[other].y) });
+        }
+        dists.sort((a, b) => a.dist - b.dist);
+        let added = 0;
+        for (const { id: other } of dists) {
+            if (nodes[id].neighbors.includes(other)) continue;
+            // Проверка на пересечение
+            let ok = true;
+            for (const conn of connections) {
+                if (doLinesIntersect(
+                    nodes[id].x, nodes[id].y, nodes[other].x, nodes[other].y,
+                    nodes[conn[0]].x, nodes[conn[0]].y, nodes[conn[1]].x, nodes[conn[1]].y
+                )) { ok = false; break; }
+            }
+            if (!ok) continue;
+            nodes[id].addNeighbor(other);
+            nodes[other].addNeighbor(id);
+            connections.push([id, other]);
+            added++;
+            if (added >= 2) break;
+        }
+    }
+    return nodes;
+}
+
+game_state.nodes = generateOrganicNetwork();
 
 // --- Пульсация ---
 let pulseTime = 0;
-function drawNetwork() {
+
+// Цвета для неонового синего и красного
+const NEON_BLUE = '#00eaff';
+const NEON_RED = '#ff0055';
+
+// --- Рендер ноды ---
+function drawNode(ctx, node, selected = false) {
+    ctx.save();
+    // Пульсация размера
+    let base = node.type === 'hub' ? 36 : 24;
+    let amp = node.type === 'hub' ? 6 : 2.5;
+    let freq = node.type === 'hub' ? 1.5 : 0.7;
+    let phase = node.randomPhase || 0;
+    let time = performance.now() / 1000;
+    let size = base + Math.sin(time * freq + phase) * amp;
+    ctx.beginPath();
+    ctx.arc(node.x, node.y, size, 0, 2 * Math.PI);
+    // Цвет и свечение по типу
+    if (node.type === 'hub') {
+        ctx.shadowColor = NEON_RED;
+        ctx.shadowBlur = selected ? 18 : 12;
+        ctx.fillStyle = NEON_RED;
+    } else {
+        ctx.shadowColor = NEON_BLUE;
+        ctx.shadowBlur = selected ? 14 : 8;
+        ctx.fillStyle = NEON_BLUE;
+    }
+    ctx.globalAlpha = selected ? 1 : 0.85;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = 1;
+    ctx.lineWidth = selected ? 6 : 3;
+    ctx.strokeStyle = '#fff';
+    ctx.stroke();
+    if (node.type === 'hub') {
+        // Динамический размер текста, чтобы не вылезал за пределы ноды
+        let fontSize = 16;
+        ctx.font = `bold ${fontSize}px sans-serif`;
+        let text = node.id;
+        while (ctx.measureText(text).width > size * 1.6 && fontSize > 8) {
+            fontSize -= 1;
+            ctx.font = `bold ${fontSize}px sans-serif`;
+        }
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#111';
+        ctx.fillText(text, node.x, node.y);
+    } else {
+        // Пульсирующий неоново-сиреневый кружок
+        let dotBase = size * 0.32;
+        let dotAmp = 2;
+        let dotSize = dotBase + Math.sin(time * freq + phase + 1.1) * dotAmp;
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, dotSize, 0, 2 * Math.PI);
+        ctx.shadowColor = '#b388ff';
+        ctx.shadowBlur = 12;
+        ctx.globalAlpha = 0.5;
+        ctx.fillStyle = '#b388ff';
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.shadowBlur = 0;
+        ctx.restore();
+    }
+    ctx.restore();
+}
+
+// --- Пульсация соединений ---
+function drawConnection(ctx, n1, n2, time) {
+    // Неоновая голубая пульсация с "бегущей волной"
+    const pulse = 0.5 + 0.5 * Math.sin(time / 250 + (n1.x + n2.x + n1.y + n2.y) / 200);
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(n1.x, n1.y);
+    ctx.lineTo(n2.x, n2.y);
+    ctx.strokeStyle = `rgba(0,234,255,${0.45 + 0.3 * pulse})`;
+    ctx.shadowColor = NEON_BLUE;
+    ctx.shadowBlur = 6 + 6 * pulse; // уменьшено
+    ctx.lineWidth = 3.5 + 1.2 * pulse;
+    ctx.stroke();
+    // Внутренняя "нить"
+    ctx.shadowBlur = 0;
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = '#fff';
+    ctx.globalAlpha = 0.7 + 0.3 * pulse;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.restore();
+}
+
+// --- Основной рендер ---
+function render() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    // Draw connections
-    for (const nodeId in game_state.nodes) {
-        const node = game_state.nodes[nodeId];
-        for (const neighborId of node.neighbors) {
-            if (nodeId < neighborId) {
-                const neighbor = game_state.nodes[neighborId];
-                // Ослабленная пульсация
-                const t = (pulseTime * 1.2 + node.randomPhase) % 1;
-                ctx.beginPath();
-                ctx.moveTo(node.x, node.y);
-                ctx.lineTo(neighbor.x, neighbor.y);
-                ctx.strokeStyle = `rgba(79,195,247,${0.55 + 0.15 * Math.sin(pulseTime + node.randomPhase)})`;
-                ctx.lineWidth = 2.2 + 0.6 * Math.abs(Math.sin(pulseTime + node.randomPhase));
-                ctx.stroke();
-                // Анимация "энергии"
-                const dx = neighbor.x - node.x, dy = neighbor.y - node.y;
-                const px = node.x + dx * t;
-                const py = node.y + dy * t;
-                ctx.save();
-                ctx.beginPath();
-                ctx.arc(px, py, 3, 0, 2 * Math.PI);
-                ctx.globalAlpha = 0.18 + 0.12 * Math.abs(Math.sin(pulseTime + node.randomPhase));
-                ctx.fillStyle = '#ffe066';
-                ctx.shadowColor = '#ffd700';
-                ctx.shadowBlur = 3;
-                ctx.fill();
-                ctx.globalAlpha = 1.0;
-                ctx.restore();
+    const time = Date.now();
+    // Соединения
+    for (const id in game_state.nodes) {
+        const node = game_state.nodes[id];
+        for (const nId of node.neighbors) {
+            if (id < nId) {
+                drawConnection(ctx, node, game_state.nodes[nId], time);
             }
         }
     }
-    // Draw nodes
-    for (const nodeId in game_state.nodes) {
-        drawNode(game_state.nodes[nodeId]);
+    // Ноды
+    for (const id in game_state.nodes) {
+        drawNode(ctx, game_state.nodes[id], id === game_state.selectedNode);
     }
-}
-
-function drawNode(node) {
-    ctx.save();
-    // Ослабленная пульсация размера
-    let base = node.size;
-    let amp = node.type === 'hub' ? 4 : 1.2;
-    let freq = node.type === 'hub' ? 1.2 : 0.7;
-    let size = base + Math.sin(pulseTime * freq + node.randomPhase) * amp;
-    ctx.beginPath();
-    ctx.arc(node.x, node.y, size, 0, 2 * Math.PI);
-    ctx.fillStyle = node.type === 'hub' ? '#ff4444' : '#ffd700';
-    ctx.globalAlpha = (game_state.selectedNode === node.id) ? 0.7 : 1.0;
-    ctx.fill();
-    ctx.globalAlpha = 1.0;
-    ctx.lineWidth = 4;
-    ctx.strokeStyle = node.type === 'hub' ? '#fff' : '#bfa600';
-    ctx.stroke();
-    ctx.fillStyle = '#222';
-    ctx.font = 'bold 15px Arial';
-    ctx.textAlign = 'center';
-    ctx.fillText(node.id, node.x, node.y + 5);
-    ctx.restore();
+    drawUI();
 }
 
 function drawUI() {
@@ -207,11 +351,6 @@ function drawUI() {
     ctx.fillText('Энергия: ' + game_state.energy + '/' + game_state.energy_max, canvas.width - 100, 55);
     ctx.fillText('Волна: ' + game_state.wave, canvas.width - 100, 80);
     ctx.restore();
-}
-
-function draw() {
-    drawNetwork();
-    drawUI();
 }
 
 // --- Interaction (выделение узла) ---
@@ -229,13 +368,21 @@ canvas.addEventListener('click', function(e) {
         }
     }
     game_state.selectedNode = found;
-    draw();
+    render();
 });
 
 // --- Main Loop ---
 function mainLoop() {
     pulseTime += 0.03;
-    draw();
+    render();
     requestAnimationFrame(mainLoop);
 }
 mainLoop();
+
+// При создании ноды добавляем случайную фазу для пульсации
+const oldNode = window.Node;
+window.Node = function(x, y, id, type) {
+    const n = new oldNode(x, y, id, type);
+    n.randomPhase = Math.random() * Math.PI * 2;
+    return n;
+};
