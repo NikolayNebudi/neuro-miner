@@ -489,6 +489,7 @@ canvas.addEventListener('click', function(e) {
                     if (gameState.dp >= cost) {
                         gameState.dp -= cost;
                         node.program = { type: key, level: 1 };
+                        gameState.selectedNodeId = null;
                         return;
                     }
                 }
@@ -498,14 +499,16 @@ canvas.addEventListener('click', function(e) {
                 if (node && node.type === 'cpu_node' && node.owner === 'player') {
                     if (gameState.dp >= 50) {
                         gameState.dp -= 50;
+                        node.program = { type: 'overclocker', level: 1 };
                         gameState.cpu += 30;
+                        gameState.selectedNodeId = null;
                         return;
                     }
                 }
             }
         }
     }
-    // --- Выбор ноды ---
+    // --- Захват/выделение ноды ---
     let found = false;
     for (const id in gameState.nodes) {
         const node = gameState.nodes[id];
@@ -517,6 +520,26 @@ canvas.addEventListener('click', function(e) {
         let size = base + Math.sin(time * freq + phase) * amp;
         let dx = mx - node.x, dy = my - node.y;
         if (dx*dx + dy*dy <= (size+8)*(size+8)) {
+            // Если клик по своей — просто выделяем
+            if (node.owner === 'player') {
+                gameState.selectedNodeId = id;
+                found = true;
+                break;
+            }
+            // Если клик по нейтральной/вражеской, и есть сосед-союзник — захват
+            if ((node.owner !== 'player' && !node.isCapturing)) {
+                let hasPlayerNeighbor = node.neighbors.some(nid => gameState.nodes[nid] && gameState.nodes[nid].owner === 'player');
+                if (hasPlayerNeighbor && gameState.dp >= 10) {
+                    node.isCapturing = true;
+                    node.captureProgress = 0;
+                    gameState.dp -= 10;
+                    sound.play('capture_start');
+                    gameState.selectedNodeId = id;
+                    found = true;
+                    break;
+                }
+            }
+            // В остальных случаях — просто выделяем
             gameState.selectedNodeId = id;
             found = true;
             break;
@@ -543,6 +566,7 @@ function findPathBFS(nodesObj, startId, endId) {
     return null;
 }
 
+// --- RENDERING FUNCTIONS ---
 function drawConnection(ctx, n1, n2, time) {
     let sameOwner = n1.owner === n2.owner && n1.owner !== 'neutral';
     let color, shadow;
@@ -609,240 +633,245 @@ function drawProgramIcon(ctx, node) {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     let icon = '?', color = '#fff';
-    if (node.program.type === 'miner') { icon = 'M'; color = '#ffd600'; }
-    if (node.program.type === 'shield') { icon = 'S'; color = '#00eaff'; }
-    if (node.program.type === 'sentry') { icon = 'T'; color = '#00ff90'; }
+    let time = performance.now() / 1000;
+    if (node.program.type === 'miner') {
+        icon = 'M'; color = '#ffd600';
+        // Анимация: пульсирующее кольцо
+        ctx.save();
+        ctx.globalAlpha = 0.18 + 0.12 * Math.sin(time*3 + node.x);
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, 22 + 4*Math.sin(time*2 + node.y), 0, 2 * Math.PI);
+        ctx.fillStyle = '#ffd600';
+        ctx.shadowColor = '#ffd600';
+        ctx.shadowBlur = 18;
+        ctx.fill();
+        ctx.restore();
+    }
+    if (node.program.type === 'shield') {
+        icon = 'S'; color = '#00eaff';
+        // Анимация: вращающийся глоу
+        ctx.save();
+        ctx.globalAlpha = 0.22;
+        ctx.translate(node.x, node.y);
+        ctx.rotate(time);
+        for (let i = 0; i < 4; i++) {
+            ctx.beginPath();
+            ctx.arc(0, 0, 20, i * Math.PI/2, i * Math.PI/2 + Math.PI/4);
+            ctx.strokeStyle = '#00eaff';
+            ctx.lineWidth = 5;
+            ctx.shadowColor = '#00eaff';
+            ctx.shadowBlur = 12;
+            ctx.stroke();
+        }
+        ctx.restore();
+    }
+    if (node.program.type === 'sentry') {
+        icon = 'T'; color = '#00ff90';
+        // Анимация: пульсирующее кольцо
+        ctx.save();
+        ctx.globalAlpha = 0.18 + 0.12 * Math.sin(time*4 + node.x + node.y);
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, 26 + 6*Math.abs(Math.sin(time*2 + node.x)), 0, 2 * Math.PI);
+        ctx.strokeStyle = '#00ff90';
+        ctx.lineWidth = 4.5;
+        ctx.shadowColor = '#00ff90';
+        ctx.shadowBlur = 18;
+        ctx.stroke();
+        ctx.restore();
+    }
+    if (node.program.type === 'overclocker') { icon = 'C'; color = '#b388ff'; }
     ctx.fillStyle = color;
-    ctx.fillText(icon, node.x, node.y + 18);
-    ctx.font = 'bold 12px sans-serif';
-    ctx.fillStyle = '#ffd600';
-    ctx.fillText(node.program.level, node.x + 13, node.y + 13);
+    ctx.fillText(icon, node.x, node.program.level > 1 ? node.y + 12 : node.y + 18);
+    if (node.program.level > 1) {
+        ctx.font = 'bold 12px sans-serif';
+        ctx.fillStyle = '#ffd600';
+        ctx.fillText(node.program.level, node.x + 13, node.y + 22);
+    }
     ctx.restore();
 }
 
 function drawResourcePanel(ctx) {
+    if (!gameState || !gameState.nodes) return;
     ctx.save();
     ctx.globalAlpha = 0.92;
     ctx.fillStyle = '#222b';
-    ctx.fillRect(18, 18, 170, 70);
+    ctx.fillRect(18, 18, 220, 150);
     ctx.globalAlpha = 1;
     ctx.font = 'bold 16px sans-serif';
     ctx.fillStyle = '#fff';
-    ctx.fillText('DP: ' + gameState.dp, 32, 40);
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('DP: ' + Math.floor(gameState.dp), 32, 40);
     ctx.fillText('CPU: ' + gameState.cpu, 32, 62);
-    ctx.fillText('TRACE: ' + Math.floor(gameState.traceLevel) + ' / 200', 32, 80);
+    ctx.fillText('TRACE: ' + Math.floor(gameState.traceLevel) + ' / 200', 32, 84);
     if (gameState.hubCaptureActive) {
         ctx.font = 'bold 17px sans-serif';
         ctx.fillStyle = '#ff1744';
         ctx.fillText('HUB CAPTURE: ' + Math.floor(gameState.hubCaptureProgress*100) + '%', 32, 110);
     }
-    const x = 32, y = 120, w = 180, h = 38;
-    ctx.save();
+    const x = 32, y = 125, w = 180, h = 38;
     ctx.beginPath();
     ctx.roundRect(x, y, w, h, 10);
     ctx.fillStyle = gameState.cpu >= 50 && gameState.empCooldown <= 0 ? '#232b33ee' : '#232b3344';
-    ctx.shadowColor = '#00eaff';
-    ctx.shadowBlur = 8;
+    ctx.shadowColor = '#00eaff'; ctx.shadowBlur = 8;
     ctx.fill();
-    ctx.shadowBlur = 0;
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = '#00eaff';
-    ctx.stroke();
-    ctx.fillStyle = '#fff';
-    ctx.font = 'bold 16px sans-serif';
+    ctx.shadowBlur = 0; ctx.lineWidth = 2; ctx.strokeStyle = '#00eaff'; ctx.stroke();
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 16px sans-serif';
     let label = 'EMP Blast (50 CPU)';
     if (gameState.empCooldown > 0) {
-        label += ` (${Math.ceil(gameState.empCooldown/1000)}s)`;
+        label = `Cooldown (${Math.ceil(gameState.empCooldown/1000)}s)`;
     }
-    ctx.fillText(label, x + 16, y + h/2);
-    uiButtons['emp'] = { x, y, w, h, type: 'emp' };
-    ctx.restore();
+    ctx.fillText(label, x + 10, y + h/2 + 2);
     ctx.restore();
 }
 
 function drawNode(ctx, node) {
+    if (!node) return;
     ctx.save();
-    let base = node.type === 'hub' ? 36 : 18;
-    let amp = node.type === 'hub' ? 6 : 1.5;
-    let freq = node.type === 'hub' ? 1.5 : 0.7;
-    let phase = node.randomPhase || 0;
     let time = performance.now() / 1000;
-    let highlight = (gameState.selectedNodeId === node.id) || (hoveredNodeId === node.id);
-    if (highlight) { amp *= 1.7; base += 2; }
-    let size = base + Math.sin(time * freq + phase) * amp;
+    let isSelected = (gameState.selectedNodeId === node.id);
+    let base = node.type === 'hub' ? 36 : 18;
+    let amp = isSelected ? 4 : (node.type === 'hub' ? 6 : 1.5);
+    let freq = node.type === 'hub' ? 1.5 : 0.7;
+    let size = base + Math.sin(time * freq + node.randomPhase) * amp;
+    
+    // Цвета по умолчанию
+    let fill, shadow, stroke;
+    if (node.type === 'cpu_node')   { fill = '#b388ff'; shadow = '#e1bfff'; stroke = '#b388ff'; }
+    else if (node.type === 'data_cache') { fill = '#fff'; shadow = '#00eaff'; stroke = '#00eaff'; }
+    else if (node.owner === 'player')    { fill = '#ff9100'; shadow = '#ffb347'; stroke = '#ff9100'; }
+    else                                 { fill = '#00eaff'; shadow = '#66f6ff'; stroke = '#fff'; }
+
+    // --- Особые цвета и эффекты для программ ---
+    if (node.owner === 'player' && node.program) {
+        let lvl = node.program.level || 1;
+        if (node.program.type === 'miner') {
+            // Цвет и глоу усиливаются с уровнем
+            const minerColors = ['#ffd600', '#ffe066', '#fff2b2'];
+            fill = minerColors[Math.min(lvl-1, minerColors.length-1)];
+            shadow = fill;
+            stroke = '#fffbe7';
+            // Яркое пульсирующее кольцо
+            for (let i = 0; i < lvl; i++) {
+                ctx.save();
+                ctx.globalAlpha = 0.18 + 0.08*i;
+                ctx.beginPath();
+                ctx.arc(node.x, node.y, size + 12 + 6*i + 3*Math.sin(time*2 + i), 0, 2 * Math.PI);
+                ctx.strokeStyle = minerColors[Math.min(i, minerColors.length-1)];
+                ctx.lineWidth = 4 + 2*i;
+                ctx.shadowColor = minerColors[Math.min(i, minerColors.length-1)];
+                ctx.shadowBlur = 18 + 8*i;
+                ctx.stroke();
+                ctx.restore();
+            }
+        }
+        if (node.program.type === 'shield') {
+            const shieldColors = ['#00eaff', '#33f6ff', '#b2faff'];
+            fill = shieldColors[Math.min(lvl-1, shieldColors.length-1)];
+            shadow = fill;
+            stroke = '#e0f7fa';
+            // Вращающийся глоу и кольца
+            for (let i = 0; i < lvl; i++) {
+                ctx.save();
+                ctx.globalAlpha = 0.18 + 0.08*i;
+                ctx.translate(node.x, node.y);
+                ctx.rotate(time * (1 + i*0.5));
+                ctx.beginPath();
+                ctx.arc(0, 0, size + 10 + 7*i, 0, 2 * Math.PI);
+                ctx.strokeStyle = shieldColors[Math.min(i, shieldColors.length-1)];
+                ctx.lineWidth = 5 + 2*i;
+                ctx.shadowColor = shieldColors[Math.min(i, shieldColors.length-1)];
+                ctx.shadowBlur = 16 + 8*i;
+                ctx.stroke();
+                ctx.restore();
+            }
+        }
+        if (node.program.type === 'sentry') {
+            const sentryColors = ['#00ff90', '#00ffcc', '#b2ffe7'];
+            fill = sentryColors[Math.min(lvl-1, sentryColors.length-1)];
+            shadow = fill;
+            stroke = '#e0ffe7';
+            // Пульсирующие кольца и вспышки
+            for (let i = 0; i < lvl; i++) {
+                ctx.save();
+                ctx.globalAlpha = 0.18 + 0.08*i;
+                ctx.beginPath();
+                ctx.arc(node.x, node.y, size + 14 + 7*i + 4*Math.abs(Math.sin(time*2 + i)), 0, 2 * Math.PI);
+                ctx.strokeStyle = sentryColors[Math.min(i, sentryColors.length-1)];
+                ctx.lineWidth = 4.5 + 2*i;
+                ctx.shadowColor = sentryColors[Math.min(i, sentryColors.length-1)];
+                ctx.shadowBlur = 18 + 8*i;
+                ctx.stroke();
+                ctx.restore();
+            }
+        }
+    }
+    if (isSelected) { shadow = '#ff1744'; stroke = '#ff1744'; }
+
     ctx.beginPath();
     ctx.arc(node.x, node.y, size, 0, 2 * Math.PI);
-    let fill, shadow, stroke;
-    if (node.type === 'cpu_node') { fill = '#b388ff'; shadow = '#e1bfff'; stroke = '#b388ff'; }
-    else if (node.type === 'data_cache') { fill = '#fff'; shadow = '#00eaff'; stroke = '#00eaff'; }
-    else if (node.owner === 'player') { fill = '#ff9100'; shadow = '#ffb347'; stroke = '#ff9100'; }
-    else if (node.owner === 'enemy') { fill = '#ff1744'; shadow = '#ff668a'; stroke = '#ff1744'; }
-    else { fill = '#00eaff'; shadow = '#66f6ff'; stroke = '#fff'; }
-    if (highlight) { shadow = '#ff1744'; fill = node.type === 'hub' ? '#ff9100' : '#ff1744'; stroke = '#ff1744'; }
-    ctx.shadowColor = shadow;
-    ctx.shadowBlur = highlight ? 32 : (node.type === 'hub' ? 24 : 18);
-    ctx.fillStyle = fill;
-    ctx.globalAlpha = 1;
-    ctx.fill();
-    ctx.shadowBlur = 0;
-    ctx.lineWidth = highlight ? 4 : 3;
-    ctx.strokeStyle = stroke;
-    ctx.stroke();
-    if (node.type === 'cpu_node') {
-        ctx.font = 'bold 13px sans-serif';
-        ctx.fillStyle = '#fff';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('CPU', node.x, node.y);
-    }
-    if (node.type === 'data_cache') {
-        ctx.font = 'bold 13px sans-serif';
-        ctx.fillStyle = '#00eaff';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('DATA', node.x, node.y);
-    }
+    ctx.shadowColor = shadow; ctx.shadowBlur = isSelected ? 32 : (node.type === 'hub' ? 24 : 18);
+    ctx.fillStyle = fill; ctx.fill();
+    ctx.shadowBlur = 0; ctx.lineWidth = 3; ctx.strokeStyle = stroke; ctx.stroke();
+    
+    if (node.type === 'cpu_node') { ctx.font = 'bold 13px sans-serif'; ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('CPU', node.x, node.y); }
+    if (node.type === 'data_cache') { ctx.font = 'bold 13px sans-serif'; ctx.fillStyle = '#00eaff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('DATA', node.x, node.y); }
+    
     if (node.isCapturing) {
-        ctx.save();
-        ctx.beginPath();
-        ctx.lineWidth = 4.5;
-        ctx.strokeStyle = '#fff';
-        ctx.globalAlpha = 0.85;
-        ctx.arc(node.x, node.y, size + 6, -Math.PI/2, -Math.PI/2 + 2 * Math.PI * node.captureProgress);
-        ctx.stroke();
-        ctx.restore();
+        ctx.save(); ctx.lineWidth = 4.5; ctx.strokeStyle = '#fff';
+        ctx.beginPath(); ctx.arc(node.x, node.y, size + 6, -Math.PI/2, -Math.PI/2 + 2 * Math.PI * node.captureProgress); ctx.stroke(); ctx.restore();
     }
-    if (node.owner === 'player' && node.captureProgress < 1 && !node.isCapturing) {
-        ctx.save();
-        ctx.beginPath();
-        ctx.lineWidth = 4.5;
-        ctx.strokeStyle = '#ff1744';
-        ctx.globalAlpha = 0.85;
-        ctx.arc(node.x, node.y, size + 10, -Math.PI/2, -Math.PI/2 + 2 * Math.PI * (1 - node.captureProgress));
-        ctx.stroke();
-        ctx.restore();
+    
+    if (node.owner === 'player' && node.program?.type === 'shield' && node.shieldHealth > 0) {
+        ctx.save(); ctx.lineWidth = 6.5; ctx.strokeStyle = '#00eaff';
+        let frac = node.shieldHealth / node.maxShieldHealth;
+        ctx.setLineDash([8, 7]); ctx.lineDashOffset = -time*10;
+        ctx.beginPath(); ctx.arc(node.x, node.y, size + 16, -Math.PI/2, -Math.PI/2 + 2 * Math.PI * frac); ctx.stroke(); ctx.restore();
     }
-    if (node.owner === 'player' && node.program && node.program.type === 'shield' && node.shieldHealth > 0) {
-        ctx.save();
-        ctx.beginPath();
-        ctx.lineWidth = 6.5;
-        ctx.strokeStyle = '#00eaff';
-        ctx.globalAlpha = 0.92;
-        let shieldFrac = node.shieldHealth / node.maxShieldHealth;
-        ctx.setLineDash([8, 7]);
-        ctx.lineDashOffset = -performance.now()/18;
-        ctx.arc(node.x, node.y, size + 16, -Math.PI/2, -Math.PI/2 + 2 * Math.PI * shieldFrac);
-        ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.restore();
-    }
-    if (node.owner === 'player' && node.program && node.program.type === 'sentry') {
-        ctx.save();
-        ctx.beginPath();
-        ctx.lineWidth = 5.5;
-        ctx.strokeStyle = '#00ff90';
-        ctx.globalAlpha = 0.7;
-        ctx.setLineDash([3, 7]);
-        ctx.lineDashOffset = -performance.now()/10;
-        ctx.arc(node.x, node.y, size + 12, 0, 2 * Math.PI);
-        ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.restore();
-    }
-    if (node.owner === 'player' && node.program && node.program.type === 'miner') {
-        ctx.save();
-        ctx.beginPath();
-        ctx.lineWidth = 4.5;
-        ctx.strokeStyle = '#ffd600';
-        ctx.globalAlpha = 0.55 + 0.25 * Math.sin(performance.now()/300 + node.x);
-        ctx.setLineDash([2, 10]);
-        ctx.lineDashOffset = -performance.now()/12;
-        ctx.arc(node.x, node.y, size + 8, 0, 2 * Math.PI);
-        ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.restore();
-    }
-    if (node.type === 'hub') {
-        ctx.font = 'bold 18px sans-serif';
-        ctx.fillStyle = '#fff';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('HUB', node.x, node.y);
-    }
+
+    if (node.type === 'hub') { ctx.font = 'bold 18px sans-serif'; ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('HUB', node.x, node.y); }
     ctx.restore();
     drawProgramIcon(ctx, node);
+
     if (node.type === 'hub' && gameState.hubCaptureActive) {
-        ctx.save();
-        ctx.beginPath();
-        ctx.lineWidth = 11;
-        ctx.strokeStyle = '#fff';
-        ctx.shadowColor = '#ff1744';
-        ctx.shadowBlur = 24;
-        ctx.globalAlpha = 0.92;
-        ctx.arc(node.x, node.y, size + 26, -Math.PI/2, -Math.PI/2 + 2 * Math.PI * gameState.hubCaptureProgress);
-        ctx.stroke();
-        ctx.shadowBlur = 0;
-        ctx.lineWidth = 4.5;
-        ctx.strokeStyle = '#ff1744';
-        ctx.globalAlpha = 0.7;
-        ctx.beginPath();
-        ctx.arc(node.x, node.y, size + 32, -Math.PI/2, -Math.PI/2 + 2 * Math.PI * gameState.hubCaptureProgress);
-        ctx.stroke();
+        ctx.save(); ctx.beginPath(); ctx.lineWidth = 11; ctx.strokeStyle = '#fff'; ctx.shadowColor = '#ff1744'; ctx.shadowBlur = 24;
+        ctx.arc(node.x, node.y, size + 26, -Math.PI/2, -Math.PI/2 + 2 * Math.PI * gameState.hubCaptureProgress); ctx.stroke();
         ctx.restore();
     }
     if (node.isTargeted) {
-        ctx.save();
-        ctx.beginPath();
-        ctx.lineWidth = 7.5;
-        ctx.strokeStyle = '#ff1744';
-        ctx.globalAlpha = 0.7 + 0.3 * Math.sin(performance.now()/120);
-        ctx.shadowColor = '#ff1744';
-        ctx.shadowBlur = 18;
-        ctx.arc(node.x, node.y, size + 22 + 4*Math.sin(performance.now()/180), 0, 2 * Math.PI);
-        ctx.stroke();
+        ctx.save(); ctx.lineWidth = 7.5; ctx.strokeStyle = '#ff1744'; ctx.globalAlpha = 0.7 + 0.3 * Math.sin(time*5);
+        ctx.shadowColor = '#ff1744'; ctx.shadowBlur = 18;
+        ctx.beginPath(); ctx.arc(node.x, node.y, size + 22 + 4*Math.sin(time*5), 0, 2 * Math.PI); ctx.stroke();
         ctx.restore();
     }
 }
 
 function calculateProgramUIButtons(selectedNode) {
     if (!selectedNode) return {};
-    let offsetX = 40;
-    let offsetY = 0;
-    const btnW = 140, btnH = 38, btnW2 = 120, btnH2 = 36, spacing = 12;
-    let totalHeight = btnH2 * 3 + spacing * 2;
-    if (selectedNode.type === 'cpu_node') totalHeight += btnH2 + spacing;
-    let menuRight = selectedNode.x + offsetX + btnW;
-    let menuTop = selectedNode.y - totalHeight/2;
-    let menuBottom = selectedNode.y + totalHeight/2;
-    if (menuRight > canvas.width - 10) offsetX -= (menuRight - (canvas.width - 10));
-    if (menuTop < 10) offsetY += (10 - menuTop);
-    if (menuBottom > canvas.height - 10) offsetY -= (menuBottom - (canvas.height - 10));
     const buttons = {};
+    let offsetX = 40, offsetY = 0;
+    const btnW = 180, btnH = 38, btnW2 = 150, btnH2 = 36, spacing = 12;
+    if(selectedNode.x + offsetX + btnW > canvas.width) offsetX = - (btnW + 40);
+
     if (selectedNode.program) {
-        let prog = selectedNode.program;
-        let baseCost = prog.type === 'miner' ? 20 : prog.type === 'shield' ? 30 : 40;
-        let cost = baseCost * prog.level;
-        let cpuCost = 5 * prog.level;
         const x = selectedNode.x + offsetX;
         const y = selectedNode.y - btnH/2 + offsetY;
-        buttons['upgrade'] = { x, y, w: btnW, h: btnH, type: 'upgrade', cost, cpuCost };
-    }
-    const buttonData = [];
-    if (selectedNode.type !== 'cpu_node') {
-        buttonData.push({ label: 'Miner', cost: 20, type: 'miner' });
-        buttonData.push({ label: 'Shield', cost: 30, type: 'shield' });
-        buttonData.push({ label: 'Sentry', cost: 40, type: 'sentry' });
-    }
-    if (selectedNode.type === 'cpu_node') {
-        buttonData.push({ label: 'Overclocker', cost: 50, type: 'overclocker' });
-    }
-    const startX = selectedNode.x + offsetX;
-    const startY = selectedNode.y - ((btnH2 + spacing) * buttonData.length - spacing) / 2 + offsetY;
-    for (let i = 0; i < buttonData.length; i++) {
-        const btn = buttonData[i];
-        const x = startX;
-        const y = startY + i * (btnH2 + spacing);
-        buttons[btn.type] = { x, y, w: btnW2, h: btnH2, type: btn.type, cost: btn.cost };
+        buttons['upgrade'] = { x, y, w: btnW, h: btnH, type: 'upgrade'};
+    } else {
+        const buttonData = [];
+        if (selectedNode.type === 'cpu_node') {
+            buttonData.push({ label: 'Overclocker', cost: 50, type: 'overclocker' });
+        } else {
+            buttonData.push({ label: 'Miner', cost: 20, type: 'miner' });
+            buttonData.push({ label: 'Shield', cost: 30, type: 'shield' });
+            buttonData.push({ label: 'Sentry', cost: 40, type: 'sentry' });
+        }
+        const totalHeight = buttonData.length * (btnH2 + spacing) - spacing;
+        const startY = selectedNode.y - totalHeight/2 + offsetY;
+        for (let i = 0; i < buttonData.length; i++) {
+            const btn = buttonData[i];
+            buttons[btn.type] = { x: selectedNode.x + offsetX, y: startY + i * (btnH2 + spacing), w: btnW2, h: btnH2, type: btn.type, cost: btn.cost, label: btn.label };
+        }
     }
     return buttons;
 }
@@ -850,124 +879,76 @@ function calculateProgramUIButtons(selectedNode) {
 function drawProgramUI(ctx, selectedNode) {
     if (!selectedNode) return;
     ctx.save();
-    ctx.font = 'bold 16px sans-serif';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    let offsetX = 40;
-    let offsetY = 0;
-    const btnW = 140, btnH = 38, btnW2 = 120, btnH2 = 36, spacing = 12;
-    let totalHeight = btnH2 * 3 + spacing * 2;
-    if (selectedNode.type === 'cpu_node') totalHeight += btnH2 + spacing;
-    let menuRight = selectedNode.x + offsetX + btnW;
-    let menuTop = selectedNode.y - totalHeight/2;
-    let menuBottom = selectedNode.y + totalHeight/2;
-    if (menuRight > canvas.width - 10) offsetX -= (menuRight - (canvas.width - 10));
-    if (menuTop < 10) offsetY += (10 - menuTop);
-    if (menuBottom > canvas.height - 10) offsetY -= (menuBottom - (canvas.height - 10));
-    uiButtons = calculateProgramUIButtons(selectedNode);
-    if (selectedNode.program) {
-        let prog = selectedNode.program;
-        let baseCost = prog.type === 'miner' ? 20 : prog.type === 'shield' ? 30 : 40;
-        let cost = baseCost * prog.level;
-        let cpuCost = 5 * prog.level;
-        const x = selectedNode.x + offsetX;
-        const y = selectedNode.y - btnH/2 + offsetY;
-        ctx.beginPath();
-        ctx.roundRect(x, y, btnW, btnH, 10);
-        ctx.fillStyle = '#232b33ee';
-        ctx.shadowColor = '#00eaff';
-        ctx.shadowBlur = 8;
-        ctx.fill();
-        ctx.shadowBlur = 0;
-        ctx.lineWidth = 2;
-        ctx.strokeStyle = '#00eaff';
-        ctx.stroke();
+    ctx.font = 'bold 16px sans-serif'; ctx.textBaseline = 'middle';
+
+    uiButtons = calculateProgramUIButtons(selectedNode); // Recalculate for drawing
+
+    for (const key in uiButtons) {
+        const btn = uiButtons[key];
+        ctx.beginPath(); ctx.roundRect(btn.x, btn.y, btn.w, btn.h, 10);
+        ctx.fillStyle = '#232b33ee'; ctx.shadowColor = '#00eaff';
+        ctx.shadowBlur = 8; ctx.fill(); ctx.shadowBlur = 0;
+        ctx.lineWidth = 2; ctx.strokeStyle = '#00eaff'; ctx.stroke();
         ctx.fillStyle = '#fff';
-        let label = prog.type === 'miner' ? 'Miner' : prog.type === 'shield' ? 'Shield' : 'Sentry';
-        ctx.fillText(`Upgrade ${label} (Lvl ${prog.level+1}, ${cost} DP, ${cpuCost} CPU)`, x + 16, y + btnH/2);
-    }
-    const buttonData = [];
-    if (selectedNode.type !== 'cpu_node') {
-        buttonData.push({ label: 'Miner', cost: 20, type: 'miner' });
-        buttonData.push({ label: 'Shield', cost: 30, type: 'shield' });
-        buttonData.push({ label: 'Sentry', cost: 40, type: 'sentry' });
-    }
-    if (selectedNode.type === 'cpu_node') {
-        buttonData.push({ label: 'Overclocker', cost: 50, type: 'overclocker' });
-    }
-    const startX = selectedNode.x + offsetX;
-    const startY = selectedNode.y - ((btnH2 + spacing) * buttonData.length - spacing) / 2 + offsetY;
-    for (let i = 0; i < buttonData.length; i++) {
-        const btn = buttonData[i];
-        const x = startX;
-        const y = startY + i * (btnH2 + spacing);
-        ctx.beginPath();
-        ctx.roundRect(x, y, btnW2, btnH2, 10);
-        ctx.fillStyle = '#232b33ee';
-        ctx.shadowColor = '#00eaff';
-        ctx.shadowBlur = 8;
-        ctx.fill();
-        ctx.shadowBlur = 0;
-        ctx.lineWidth = 2;
-        ctx.strokeStyle = '#00eaff';
-        ctx.stroke();
-        ctx.fillStyle = '#fff';
-        ctx.fillText(`${btn.label} (${btn.cost} DP)`, x + 16, y + btnH2 / 2);
+        
+        let label = '';
+        if (btn.type === 'upgrade') {
+            let prog = selectedNode.program;
+            let baseCost = prog.type === 'miner' ? 20 : prog.type === 'shield' ? 30 : 40;
+            let cost = Math.round(baseCost * 1.5 * prog.level);
+            let cpuCost = 10 * prog.level;
+            label = `Upgrade Lvl ${prog.level+1} (${cost}DP, ${cpuCost}CPU)`;
+        } else {
+            label = `${btn.label} (${btn.cost} DP)`;
+        }
+        ctx.textAlign = 'center';
+        ctx.fillText(label, btn.x + btn.w/2, btn.y + btn.h/2);
     }
     ctx.restore();
 }
 
 function drawMenu(ctx) {
     ctx.save();
-    ctx.fillStyle = '#181c22ee';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.font = 'bold 38px sans-serif';
-    ctx.fillStyle = '#ffd600';
-    ctx.textAlign = 'center';
-    ctx.fillText('CYBER NETWORK', canvas.width/2, canvas.height/2-60);
-    ctx.font = 'bold 22px sans-serif';
-    ctx.fillStyle = '#fff';
-    ctx.fillText('AI-Driven Edition', canvas.width/2, canvas.height/2-20);
-    ctx.font = 'bold 20px sans-serif';
-    ctx.fillStyle = '#00eaff';
-    ctx.fillText('Нажмите "Start New Game"', canvas.width/2, canvas.height/2+30);
-    ctx.font = 'bold 24px sans-serif';
-    ctx.fillStyle = '#ffd600';
-    ctx.fillRect(canvas.width/2-90, canvas.height/2+60, 180, 48);
-    ctx.fillStyle = '#232b33';
-    ctx.fillText('Start New Game', canvas.width/2, canvas.height/2+90);
+    ctx.fillStyle = '#181c22ee'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.font = 'bold 48px sans-serif'; ctx.fillStyle = '#ffd600'; ctx.textAlign = 'center';
+    ctx.fillText('NETWORK ECHO', canvas.width/2, canvas.height/2 - 80);
+    ctx.font = '22px sans-serif'; ctx.fillStyle = '#fff';
+    ctx.fillText('AI-Driven Balance Edition', canvas.width/2, canvas.height/2 - 40);
+    
+    const btn = { x: canvas.width/2-120, y: canvas.height/2+20, w: 240, h: 50 };
+    ctx.beginPath(); ctx.roundRect(btn.x, btn.y, btn.w, btn.h, 15);
+    ctx.fillStyle = '#ffd600'; ctx.fill();
+    ctx.font = 'bold 24px sans-serif'; ctx.fillStyle = '#232b33'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('Start New Game', btn.x + btn.w/2, btn.y + btn.h/2);
     ctx.restore();
 }
 
-function drawEndScreen(ctx, win, score) {
+function drawEndScreen(ctx, isWin, score) {
     ctx.save();
-    ctx.fillStyle = win ? '#00ff90ee' : '#ff1744ee';
+    ctx.fillStyle = isWin ? 'rgba(0, 255, 144, 0.85)' : 'rgba(255, 23, 68, 0.85)';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.font = 'bold 48px sans-serif';
-    ctx.fillStyle = '#fff';
-    ctx.textAlign = 'center';
-    ctx.fillText(win ? 'YOU WIN!' : 'GAME OVER', canvas.width/2, canvas.height/2-60);
-    ctx.font = 'bold 24px sans-serif';
-    ctx.fillStyle = '#ffd600';
-    ctx.fillText('Score: ' + score, canvas.width/2, canvas.height/2-10);
-    ctx.font = 'bold 22px sans-serif';
-    ctx.fillStyle = '#232b33';
-    ctx.fillRect(canvas.width/2-80, canvas.height/2+30, 160, 44);
-    ctx.fillStyle = '#ffd600';
-    ctx.fillText('Play Again', canvas.width/2, canvas.height/2+60);
+    ctx.font = 'bold 48px sans-serif'; ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+    ctx.fillText(isWin ? 'YOU WIN!' : 'GAME OVER', canvas.width/2, canvas.height/2 - 60);
+    ctx.font = 'bold 24px sans-serif'; ctx.fillStyle = '#fff';
+    ctx.fillText('Final DP: ' + Math.floor(score), canvas.width/2, canvas.height/2 - 10);
+    
+    const btn = { x: canvas.width/2 - 80, y: canvas.height/2 + 30, w: 160, h: 44 };
+    ctx.beginPath(); ctx.roundRect(btn.x, btn.y, btn.w, btn.h, 10);
+    ctx.fillStyle = '#232b33'; ctx.fill();
+    ctx.font = 'bold 22px sans-serif'; ctx.fillStyle = '#ffd600'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('Main Menu', btn.x + btn.w/2, btn.y + btn.h/2);
     ctx.restore();
 }
 
 function drawHint(ctx, text) {
     if (!text) return;
     ctx.save();
-    ctx.globalAlpha = 0.92;
-    ctx.fillStyle = '#232b33ee';
-    ctx.fillRect(20, canvas.height-80, 420, 44);
-    ctx.font = 'bold 18px sans-serif';
-    ctx.fillStyle = '#ffd600';
-    ctx.textAlign = 'left';
-    ctx.fillText(text, 36, canvas.height-50);
+    ctx.globalAlpha = 0.92; ctx.fillStyle = '#232b33ee';
+    ctx.font = 'bold 16px sans-serif';
+    const textWidth = ctx.measureText(text).width;
+    ctx.fillRect(20, canvas.height-70, textWidth + 30, 44);
+    ctx.fillStyle = '#ffd600'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(text, 35, canvas.height - 48);
     ctx.restore();
 }
 
@@ -1104,112 +1085,189 @@ function render() {
 }
 
 function update(dt, now) {
-    // FSM: MENU
-    if (gameState.phase === 'MENU') return;
-    // FSM: END_SCREEN
-    if (gameState.phase === 'END_SCREEN') return;
-    // FSM: PLAYING
-    // 1. Таймеры и cooldowns
-    if (gameState.empCooldown > 0) gameState.empCooldown -= dt;
-    if (gameState.empCooldown < 0) gameState.empCooldown = 0;
-    // 2. Враги
-    for (const enemy of gameState.enemies) {
-        if (enemy.isStunnedUntil && enemy.isStunnedUntil > now) continue;
-        // AI: движение к цели
-        if (!enemy.path || enemy.path.length === 0) {
-            // Найти новую цель (игровая логика)
-            // ...
+    // --- Управление состоянием игры ---
+    if (gameState.phase !== 'PLAYING') return;
+
+    gameState.game_time += dt;
+
+    // --- Win/Loss Conditions ---
+    if (!godMode) {
+        if (gameState.traceLevel >= 200) {
+            gameState.phase = 'END_SCREEN'; gameState.win = false; sound.play('lose'); return;
         }
-        // Перемещение по path
-        // ...
-        // Атака/деконтроль
-        // ...
+        if (gameState.playerRootNodeId && (!gameState.nodes[gameState.playerRootNodeId] || gameState.nodes[gameState.playerRootNodeId].owner !== 'player')) {
+            gameState.phase = 'END_SCREEN'; gameState.win = false; sound.play('lose'); return;
+        }
     }
-    // 3. Программы
+
+    // --- Финальный захват HUB ---
+    if (gameState.hubCaptureActive) {
+        gameState.traceLevel = Math.max(gameState.traceLevel, 180);
+        gameState.hubCaptureProgress += dt / 60; // ~60 секунд до победы
+        if (gameState.hubCaptureProgress >= 1) {
+            gameState.phase = 'END_SCREEN'; gameState.win = true; sound.play('win'); return;
+        }
+    }
+    
+    // --- Глобальный рост TraceLevel ---
+    if (!godMode) {
+        gameState.traceLevel += (0.1 + gameState.traceLevel * 0.001) * dt; // Растет все быстрее
+    }
+
+    // --- Логика для каждого узла ---
     for (const id in gameState.nodes) {
         const node = gameState.nodes[id];
-        if (node.program) {
-            // Miner: добыча DP
-            if (node.program.type === 'miner') {
-                let reward = Math.pow(node.program.level, 1.5);
-                gameState.dp += reward * dt / 1000;
+        if (!node) continue;
+
+        // 1. Захват узлов
+        if (node.isCapturing) {
+            node.captureProgress += dt; // 1 секунда на захват
+            if (node.captureProgress >= 1) {
+                node.isCapturing = false;
+                node.captureProgress = 0;
+                node.owner = 'player';
+                node.program = null;
+                if (!godMode) gameState.traceLevel += 5; // Значительный штраф за расширение
+                sound.play('capture_success');
+                if (node.type === 'data_cache') {
+                    gameState.dp += 100;
+                    node.type = 'data'; // Бонус выдается один раз
+                }
             }
-            // Shield: восстановление щита
+        }
+
+        // 2. Логика программ игрока
+        if (node.owner === 'player' && node.program) {
+            // Регенерация щита
             if (node.program.type === 'shield') {
-                if (!node.maxShieldHealth) node.maxShieldHealth = 100 * node.program.level;
-                if (!node.shieldHealth) node.shieldHealth = node.maxShieldHealth;
-                node.shieldHealth += 8 * dt / 1000;
-                if (node.shieldHealth > node.maxShieldHealth) node.shieldHealth = node.maxShieldHealth;
+                node.maxShieldHealth = 100 * Math.pow(1.5, node.program.level - 1);
+                if (node.shieldHealth < node.maxShieldHealth) {
+                    node.shieldHealth += (10 * node.program.level) * dt;
+                    if (node.shieldHealth > node.maxShieldHealth) node.shieldHealth = node.maxShieldHealth;
+                }
             }
-            // Sentry: атака врагов
+            // Атака Sentry
             if (node.program.type === 'sentry') {
-                for (const enemy of gameState.enemies) {
-                    if (enemy.currentNodeId === id) {
-                        let armor = enemy.armor || 0;
-                        let level = node.program.level;
-                        let dmg = Math.pow(level, 1.5);
-                        if (armor > level) dmg *= 0.1;
-                        enemy.health -= dmg * dt / 1000;
-                        if (enemy.health <= 0) {
-                            gameState.dp += Math.pow(level, 1.5);
-                            enemy.isDead = true;
-                        }
+                if (!node.program.cooldown || now > node.program.cooldown) {
+                    let sentryRange = 200 + 20 * (node.program.level - 1);
+                    let nearestEnemy = null, minDist = sentryRange;
+                    for (const enemy of gameState.enemies) {
+                        const enemyNode = gameState.nodes[enemy.currentNodeId];
+                        if (!enemyNode) continue;
+                        const dist = getDistance(node.x, node.y, enemyNode.x, enemyNode.y);
+                        if (dist < minDist) { minDist = dist; nearestEnemy = enemy; }
+                    }
+                    if (nearestEnemy) {
+                        let baseDmg = 5 * Math.pow(2, node.program.level - 1); // Урон удваивается с уровнем
+                        const enemyNode = gameState.nodes[nearestEnemy.currentNodeId];
+                        nearestEnemy.health -= baseDmg;
+                        visualEffects.sentryShots.push({ from: {x:node.x, y:node.y}, to: {x:enemyNode.x, y:enemyNode.y}, time: now });
+                        visualEffects.sentryFlashes.push({ x:enemyNode.x, y:enemyNode.y, time: now });
+                        sound.play('sentry_shoot');
+                        node.program.cooldown = now + (1000 / node.program.level);
                     }
                 }
             }
         }
-        // Захват ноды
-        if (node.isCapturing) {
-            node.captureProgress += dt / 2000;
-            if (node.captureProgress >= 1) {
-                node.captureProgress = 1;
-                node.isCapturing = false;
-                node.owner = 'player';
-                gameState.dp += 5;
+    }
+
+    // --- Ресурсы (раз в секунду) ---
+    gameState.lastMinerTick += dt;
+    if (gameState.lastMinerTick > 1) {
+        let dpIncome = 0, cpuIncome = 0;
+        if(gameState.nodes['hub'] && gameState.nodes['hub'].owner === 'player') dpIncome += 2; // Базовый доход от HUB
+        for (const id in gameState.nodes) {
+            const node = gameState.nodes[id];
+            if (node.owner === 'player' && node.program) {
+                const level = node.program.level;
+                if (node.program.type === 'miner') dpIncome += 3 * Math.pow(1.8, level - 1);
+                if (node.program.type === 'overclocker') cpuIncome += 1 * level;
+            }
+        }
+        gameState.dp += Math.floor(dpIncome);
+        gameState.cpu += Math.floor(cpuIncome);
+        gameState.lastMinerTick = 0;
+    }
+    
+    // --- Враги ---
+    gameState.lastEnemySpawn += dt;
+    const spawnInterval = gameState.hubCaptureActive ? 2 : Math.max(1.5, (10 - (gameState.traceLevel * 0.02)) ); // секунды
+    if (gameState.lastEnemySpawn > spawnInterval) {
+        const spawnableNodes = Object.values(gameState.nodes).filter(n => n.owner !== 'player' && n.type !== 'hub');
+        if (spawnableNodes.length > 0) {
+            const startNode = spawnableNodes[Math.floor(Math.random() * spawnableNodes.length)];
+            let enemyType = (gameState.traceLevel > 50 || gameState.hubCaptureActive) ? 'hunter' : 'patrol';
+            let path;
+            if (enemyType === 'hunter') {
+                let targets = Object.values(gameState.nodes).filter(n => n.owner === 'player' && n.program?.type === 'miner' || n.type === 'cpu_node');
+                if (targets.length === 0) targets = Object.values(gameState.nodes).filter(n => n.owner === 'player');
+                
+                if (targets.length > 0) {
+                    let targetNode = targets[Math.floor(Math.random() * targets.length)];
+                    path = findPathBFS(gameState.nodes, startNode.id, targetNode.id);
+                    if (gameState.nodes[targetNode.id]) {
+                        gameState.nodes[targetNode.id].isTargeted = true;
+                        gameState.nodes[targetNode.id].targetedUntil = performance.now() + 3000;
+                    }
+                }
+            }
+            if (!path || path.length < 2) path = getRandomPath(gameState.nodes, startNode.id, 10);
+            
+            const enemy = new Enemy('e' + gameState.enemyIdCounter++, startNode.id, path, enemyType);
+            enemy.lastMove = 0; // таймер движения
+            gameState.enemies.push(enemy);
+        }
+        gameState.lastEnemySpawn = 0;
+    }
+
+    // Логика врагов (движение, атака)
+    for (const enemy of gameState.enemies) {
+        if (enemy.isStunnedUntil > performance.now()) continue;
+        if (!enemy.path || enemy.pathStep >= enemy.path.length - 1) {
+            recalcAllEnemyPaths();
+            continue;
+        }
+        if (enemy.lastMove === undefined) enemy.lastMove = 0;
+        enemy.lastMove += dt;
+        let moveInterval = (enemy.type === 'hunter' ? 0.9 : 1.4); // секунды
+        if (enemy.lastMove > moveInterval) {
+            enemy.pathStep++; enemy.currentNodeId = enemy.path[enemy.pathStep]; enemy.lastMove = 0;
+        }
+        const node = gameState.nodes[enemy.currentNodeId];
+        if (node && node.owner === 'player' && !godMode) {
+            let damage = 30 * dt;
+            if (node.program?.type === 'shield' && node.shieldHealth > 0) {
+                node.shieldHealth -= damage;
+            } else if (node.program?.type !== 'sentry') {
+                node.captureProgress -= 0.3 * dt;
+                if (node.captureProgress <= 0) {
+                    node.owner = 'neutral'; node.program = null; node.captureProgress = 0; node.shieldHealth = 0;
+                    if(gameState.selectedNodeId === node.id) gameState.selectedNodeId = null;
+                    triggerScreenShake(7, 250); sound.play('node_lost');
+                }
             }
         }
     }
-    // Удаление мёртвых врагов
-    gameState.enemies = gameState.enemies.filter(e => !e.isDead);
-    // 4. Захват HUB
-    if (gameState.hubCaptureActive) {
-        gameState.hubCaptureProgress += dt / 8000;
-        if (gameState.hubCaptureProgress >= 1) {
-            gameState.hubCaptureProgress = 1;
-            gameState.phase = 'END_SCREEN';
-            gameState.win = true;
-            gameState.dp += 200;
+    
+    // --- Очистка и таймеры ---
+    const killedEnemies = gameState.enemies.filter(e => e.health <= 0);
+    if(killedEnemies.length > 0) {
+        if (!godMode) gameState.traceLevel += 3 * killedEnemies.length;
+        gameState.dp += 15 * killedEnemies.length;
+        for(const enemy of killedEnemies) {
+            const node = gameState.nodes[enemy.currentNodeId];
+            if (node) visualEffects.enemyExplosions.push({x:node.x, y:node.y, time: now});
         }
+        triggerScreenShake(5, 150); sound.play('enemy_explode');
     }
-    // 5. Trace Level
-    gameState.traceLevel += dt / 12000;
-    if (gameState.traceLevel >= 200) {
-        gameState.phase = 'END_SCREEN';
-        gameState.win = false;
+    gameState.enemies = gameState.enemies.filter(e => e.health > 0);
+    
+    if (gameState.empCooldown > 0) gameState.empCooldown -= dt * 1000;
+    if (screenShake.duration > 0) screenShake.duration -= dt * 1000;
+    for (const id in gameState.nodes) {
+        const node = gameState.nodes[id];
+        if (node.isTargeted && now > node.targetedUntil) node.isTargeted = false;
     }
-    // 6. Спавн врагов (пример)
-    if (!gameState.lastEnemySpawn) gameState.lastEnemySpawn = now;
-    if (now - gameState.lastEnemySpawn > 4000) {
-        // Спавн обычного врага
-        gameState.enemies.push({
-            type: 'patrol',
-            currentNodeId: 'n1',
-            hp: 10,
-            armor: 0,
-        });
-        // Armored Hunter при trace > 80
-        if (gameState.traceLevel > 80) {
-            gameState.enemies.push({
-                type: 'hunter',
-                currentNodeId: 'n2',
-                hp: 30,
-                armor: 2,
-            });
-        }
-        gameState.lastEnemySpawn = now;
-    }
-    // 7. Победа/поражение (доп. условия)
-    // ...
 }
 
 function mainLoop() {
@@ -1268,5 +1326,33 @@ const sound = {
         console.log('[SOUND]', name);
     }
 };
+
+// --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ВРАГОВ ---
+function getRandomPath(nodesObj, startId, length = 5) {
+    let path = [startId];
+    let current = startId;
+    for (let i = 0; i < length; i++) {
+        const neighbors = nodesObj[current].neighbors.filter(nid => !path.includes(nid));
+        if (neighbors.length === 0) break;
+        const next = neighbors[Math.floor(Math.random() * neighbors.length)];
+        path.push(next);
+        current = next;
+    }
+    return path;
+}
+
+function recalcAllEnemyPaths() {
+    for (const enemy of gameState.enemies) {
+        if (!enemy.currentNodeId) continue;
+        // Попробуем найти ближайшую player-ноду
+        let targets = Object.values(gameState.nodes).filter(n => n.owner === 'player');
+        if (targets.length === 0) continue;
+        let targetNode = targets[Math.floor(Math.random() * targets.length)];
+        let path = findPathBFS(gameState.nodes, enemy.currentNodeId, targetNode.id);
+        if (!path || path.length < 2) path = getRandomPath(gameState.nodes, enemy.currentNodeId, 8);
+        enemy.path = path;
+        enemy.pathStep = 0;
+    }
+}
 
 mainLoop();
