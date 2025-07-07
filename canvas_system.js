@@ -1,6 +1,41 @@
+// --- Глобальные переменные ---
+let gameState = {
+    nodes: {},
+    dp: 0,
+    cpu: 0,
+    traceLevel: 0,
+    playerRootNodeId: 'hub',
+    enemies: [],
+    selectedNodeId: null,
+    hubCaptureActive: false,
+    hubCaptureProgress: 0,
+    empCooldown: 0,
+    techLevel: 1,
+    game_time: 0,
+    lastMinerTick: 0,
+    lastEnemySpawn: 0,
+    enemyIdCounter: 1,
+    win: false,
+    phase: 'MENU', // FSM: 'MENU', 'PLAYING', 'END_SCREEN'
+};
+let uiButtons = {};
+let visualEffects = { sentryShots: [], sentryFlashes: [], enemyExplosions: [] };
+let screenShake = { duration: 0, magnitude: 0 };
+let godMode = false;
+let lastTimestamp = 0;
+let lastHint = '';
+let hoveredNodeId = null;
+
 // --- CANVAS NETWORK SYSTEM ---
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
+canvas.width = window.innerWidth;
+canvas.height = window.innerHeight;
+window.addEventListener('resize', () => {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    render();
+});
 
 // --- Node Class ---
 class Node {
@@ -341,55 +376,25 @@ function attachTailsToNetwork(nodesObj) {
 }
 
 // --- Визуализация и анимация на canvas ---
-let game_state = {
-    nodes: {},
-    dp: 100, // Data Packets
-    cpu: 50, // CPU Time
-    traceLevel: 0,
-    playerRootNodeId: null,
-    enemies: [],
-    selectedNodeId: null,
-    hubCaptureActive: false,
-    hubCaptureProgress: 0,
-    empCooldown: 0,
-};
-let hoveredNodeId = null;
 let pathAnim = { path: null, startTime: 0, hovered: null };
-let lastMinerTick = 0;
-let lastEnemySpawn = 0;
-let enemyIdCounter = 1;
-let uiButtons = {};
-let sentryShots = [];
-let sentryFlashes = [];
-let enemyExplosions = [];
-let gameOver = false;
-let screenShake = { duration: 0, magnitude: 0, x: 0, y: 0 };
-let isRendering = false;
-
-// --- Централизованный UI state ---
-let uiState = {
-    selectedNodeId: null,
-    uiButtons: {}
-};
 
 function triggerScreenShake(magnitude, duration) {
     screenShake.duration = duration;
     screenShake.magnitude = magnitude;
 }
 
-let godMode = false;
 window.addEventListener('keydown', (e) => {
     if (e.key === 'g' || e.key === 'G') {
         godMode = !godMode;
         alert('God Mode: ' + (godMode ? 'ON' : 'OFF'));
         if (!godMode) {
             // Сбросить traceLevel, если ушёл в минус
-            if (game_state.traceLevel < 0) game_state.traceLevel = 0;
+            if (gameState.traceLevel < 0) gameState.traceLevel = 0;
             // Можно добавить сброс других временных флагов, если появятся
         }
     }
     if (e.key === 'Escape') {
-        uiState.selectedNodeId = null;
+        gameState.selectedNodeId = null;
         uiButtons = {};
     }
 });
@@ -399,8 +404,8 @@ canvas.addEventListener('mousemove', function(e) {
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
     hoveredNodeId = null;
-    for (const id in game_state.nodes) {
-        const node = game_state.nodes[id];
+    for (const id in gameState.nodes) {
+        const node = gameState.nodes[id];
         let base = node.type === 'hub' ? 36 : 18;
         let amp = node.type === 'hub' ? 6 : 1.5;
         let freq = node.type === 'hub' ? 1.5 : 0.7;
@@ -421,169 +426,103 @@ canvas.addEventListener('mousemove', function(e) {
 });
 
 canvas.addEventListener('click', function(e) {
-    if (gameOver) return;
-    if (isRendering) return;
-    // --- uiButtons всегда актуальны ---
-    uiButtons = {};
-    if (uiState.selectedNodeId) {
-        const selectedNode = game_state.nodes[uiState.selectedNodeId];
-        if (selectedNode) drawProgramUI(ctx, selectedNode);
-    }
-    // --- EMP Blast ---
     const rect = canvas.getBoundingClientRect();
-    const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
-    const my = (e.clientY - rect.top) * (canvas.height / rect.height);
-    if (uiState.uiButtons['emp']) {
-        const btn = uiState.uiButtons['emp'];
-        if (
-            mx >= btn.x && mx <= btn.x + btn.w &&
-            my >= btn.y && my <= btn.y + btn.h
-        ) {
-            if (game_state.cpu >= 50 && game_state.empCooldown <= 0) {
-                game_state.cpu -= 50;
-                game_state.empCooldown = 30000;
-                for (const enemy of game_state.enemies) {
-                    enemy.isStunnedUntil = Date.now() + 5000;
-                }
-            }
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    // --- END_SCREEN ---
+    if (gameState.phase === 'END_SCREEN') {
+        // Play Again кнопка
+        const x = canvas.width/2-80, y = canvas.height/2+30, w = 160, h = 44;
+        if (mx >= x && mx <= x+w && my >= y && my <= y+h) {
+            gameState.phase = 'MENU';
             return;
         }
     }
-    // --- Priority 0: UI-кнопки (если нода выбрана) ---
-    let uiButtonClicked = false;
-    if (uiState.selectedNodeId) {
-        for (const btnType in uiButtons) {
-            const btn = uiButtons[btnType];
-            if (
-                mx >= btn.x && mx <= btn.x + btn.w &&
-                my >= btn.y && my <= btn.y + btn.h
-            ) {
-                let node = game_state.nodes[uiState.selectedNodeId];
-                // --- Upgrade ---
-                if (btn.type === 'upgrade') {
-                    let prog = node.program;
-                    if (node.owner !== 'player') return;
-                    let baseCost = prog.type === 'miner' ? 20 : prog.type === 'shield' ? 30 : 40;
-                    let cost = baseCost * prog.level;
-                    let cpuCost = 5 * prog.level;
-                    if (game_state.dp >= cost && game_state.cpu >= cpuCost) {
-                        game_state.dp -= cost;
-                        game_state.cpu -= cpuCost;
-                        prog.level++;
-                        if (prog.type === 'shield') {
-                            node.maxShieldHealth = 100 * prog.level;
-                            node.shieldHealth = node.maxShieldHealth;
-                        }
-                        uiState.selectedNodeId = null;
-                        uiButtons = {};
-                    } else {
-                        console.log('Недостаточно DP или CPU для апгрейда', prog.type);
-                    }
-                    uiButtonClicked = true;
-                    return;
+    // --- MENU ---
+    if (gameState.phase === 'MENU') {
+        // Start New Game кнопка
+        const x = canvas.width/2-90, y = canvas.height/2+60, w = 180, h = 48;
+        if (mx >= x && mx <= x+w && my >= y && my <= y+h) {
+            startNewGame();
+            gameState.phase = 'PLAYING';
+            return;
+        }
+    }
+    // --- PLAYING ---
+    if (gameState.phase !== 'PLAYING') return;
+    // EMP Blast
+    if (uiButtons['emp']) {
+        const b = uiButtons['emp'];
+        if (mx >= b.x && mx <= b.x+b.w && my >= b.y && my <= b.y+b.h) {
+            if (gameState.cpu >= 50 && gameState.empCooldown <= 0) {
+                gameState.cpu -= 50;
+                gameState.empCooldown = 8000;
+                for (const enemy of gameState.enemies) {
+                    enemy.isStunnedUntil = performance.now() + 3500;
                 }
-                // --- Установка программ ---
-                let cost = 0;
-                if (btn.type === 'miner') cost = 20;
-                if (btn.type === 'shield') cost = 30;
-                if (btn.type === 'sentry') cost = 40;
-                if (btn.type === 'overclocker') cost = 50;
-                // --- Проверка типа ноды ---
-                if (btn.type === 'overclocker' && node.type !== 'cpu_node') return;
-                if ((btn.type === 'miner' || btn.type === 'shield' || btn.type === 'sentry') && node.type === 'cpu_node') return;
-                if (node.program) {
-                    console.log('На этой ноде уже установлена программа!');
-                    uiButtonClicked = true;
-                    return;
-                }
-                if (game_state.dp >= cost) {
-                    if (node.owner !== 'player') return;
-                    game_state.dp -= cost;
-                    node.program = { type: btn.type, level: 1 };
-                    if (btn.type === 'shield') {
-                        node.maxShieldHealth = 100;
-                        node.shieldHealth = node.maxShieldHealth;
-                    }
-                    uiState.selectedNodeId = null;
-                    uiButtons = {};
-                } else {
-                    console.log('Недостаточно DP для установки', btn.type);
-                }
-                uiButtonClicked = true;
                 return;
             }
         }
     }
-
-    // --- Сбор потенциальных целей ---
-    let potentialPlayerTargets = [];
-    let potentialNeutralTargets = [];
-    let potentialHubTargets = [];
-    for (const id in game_state.nodes) {
-        const node = game_state.nodes[id];
-        if (!node) continue;
-        const dx = mx - node.x;
-        const dy = my - node.y;
-        const r = node.type === 'hub' ? 32 : 22;
-        if (dx * dx + dy * dy < r * r) {
-            const dist = Math.sqrt(dx * dx + dy * dy);
-            if (node.type === 'hub') potentialHubTargets.push({node, dist});
-            else if (node.owner === 'player') potentialPlayerTargets.push({node, dist});
-            else if (node.owner === 'neutral') potentialNeutralTargets.push({node, dist});
+    // UI-кнопки программ
+    for (const key in uiButtons) {
+        const b = uiButtons[key];
+        if (mx >= b.x && mx <= b.x+b.w && my >= b.y && my <= b.y+b.h) {
+            if (key === 'upgrade' && gameState.selectedNodeId) {
+                const node = gameState.nodes[gameState.selectedNodeId];
+                if (node && node.program) {
+                    let baseCost = node.program.type === 'miner' ? 20 : node.program.type === 'shield' ? 30 : 40;
+                    let cost = baseCost * node.program.level;
+                    let cpuCost = 5 * node.program.level;
+                    if (gameState.dp >= cost && gameState.cpu >= cpuCost) {
+                        gameState.dp -= cost;
+                        gameState.cpu -= cpuCost;
+                        node.program.level++;
+                        return;
+                    }
+                }
+            }
+            if ((key === 'miner' || key === 'shield' || key === 'sentry') && gameState.selectedNodeId) {
+                const node = gameState.nodes[gameState.selectedNodeId];
+                if (node && !node.program && node.owner === 'player') {
+                    let cost = key === 'miner' ? 20 : key === 'shield' ? 30 : 40;
+                    if (gameState.dp >= cost) {
+                        gameState.dp -= cost;
+                        node.program = { type: key, level: 1 };
+                        return;
+                    }
+                }
+            }
+            if (key === 'overclocker' && gameState.selectedNodeId) {
+                const node = gameState.nodes[gameState.selectedNodeId];
+                if (node && node.type === 'cpu_node' && node.owner === 'player') {
+                    if (gameState.dp >= 50) {
+                        gameState.dp -= 50;
+                        gameState.cpu += 30;
+                        return;
+                    }
+                }
+            }
         }
     }
-    // Сортировка по расстоянию (ближайшая — первая)
-    potentialPlayerTargets.sort((a, b) => a.dist - b.dist);
-    potentialNeutralTargets.sort((a, b) => a.dist - b.dist);
-    potentialHubTargets.sort((a, b) => a.dist - b.dist);
-    // --- Ключевой фикс: если была выбрана нода, но клик не по UI-кнопке, сбросить UI ---
-    if (uiState.selectedNodeId && !uiButtonClicked) {
-        uiState.selectedNodeId = null;
-        uiButtons = {};
-    }
-    // --- Priority 1: Захват нейтральной ноды ---
-    for (const obj of potentialNeutralTargets) {
-        const node = obj.node;
-        const canCapture = node.neighbors.some(nid => {
-            const n = game_state.nodes[nid];
-            return n && n.owner === 'player';
-        });
-        if (canCapture) {
-            if (!godMode && game_state.dp < 10) return;
-            if (!godMode) game_state.dp -= 10;
-            node.isCapturing = true;
-            node.captureProgress = 0.01;
-            node.owner = 'player';
-            node.program = null;
-            node.shieldHealth = 0;
-            uiState.selectedNodeId = node.id;
-            return;
+    // --- Выбор ноды ---
+    let found = false;
+    for (const id in gameState.nodes) {
+        const node = gameState.nodes[id];
+        let base = node.type === 'hub' ? 36 : 18;
+        let amp = node.type === 'hub' ? 6 : 1.5;
+        let freq = node.type === 'hub' ? 1.5 : 0.7;
+        let phase = node.randomPhase || 0;
+        let time = performance.now() / 1000;
+        let size = base + Math.sin(time * freq + phase) * amp;
+        let dx = mx - node.x, dy = my - node.y;
+        if (dx*dx + dy*dy <= (size+8)*(size+8)) {
+            gameState.selectedNodeId = id;
+            found = true;
+            break;
         }
     }
-    // --- Priority 2: Выбор своей ноды ---
-    if (potentialPlayerTargets.length > 0) {
-        const node = potentialPlayerTargets[0].node;
-        const hasEnemy = game_state.enemies.some(enemy => enemy.currentNodeId === node.id);
-        if (hasEnemy) {
-            // Визуальный фидбек: shake
-            triggerScreenShake(8, 180);
-            return;
-        }
-        uiState.selectedNodeId = node.id;
-        return;
-    }
-    // --- Priority 3: Клик по HUB для финального захвата ---
-    for (const obj of potentialHubTargets) {
-        const node = obj.node;
-        if (node.owner === 'player' && !game_state.hubCaptureActive) {
-            game_state.hubCaptureActive = true;
-            game_state.hubCaptureProgress = 0;
-            return;
-        }
-    }
-    // --- Priority 4: Снять выделение ---
-    uiState.selectedNodeId = null;
-    uiButtons = {};
+    if (!found) gameState.selectedNodeId = null;
 });
 
 function findPathBFS(nodesObj, startId, endId) {
@@ -604,19 +543,12 @@ function findPathBFS(nodesObj, startId, endId) {
     return null;
 }
 
-function drawConnection(ctx, n1, n2, time, highlight = false) {
-    // Цвет соединения по owner
+function drawConnection(ctx, n1, n2, time) {
     let sameOwner = n1.owner === n2.owner && n1.owner !== 'neutral';
     let color, shadow;
-    if (sameOwner && n1.owner === 'player') {
-        color = '#ff9100'; shadow = '#ffb347';
-    } else if (sameOwner && n1.owner === 'enemy') {
-        color = '#ff1744'; shadow = '#ff668a';
-    } else if (highlight) {
-        color = `rgba(255,23,68,0.95)`; shadow = '#ff1744';
-    } else {
-        color = `rgba(0,234,255,0.85)`; shadow = '#00eaff';
-    }
+    if (sameOwner && n1.owner === 'player') { color = '#ff9100'; shadow = '#ffb347'; }
+    else if (sameOwner && n1.owner === 'enemy') { color = '#ff1744'; shadow = '#ff668a'; }
+    else { color = `rgba(0,234,255,0.85)`; shadow = '#00eaff'; }
     const pulse = 0.5 + 0.5 * Math.sin(time / 250 + (n1.x + n2.x + n1.y + n2.y) / 200);
     ctx.save();
     ctx.beginPath();
@@ -624,29 +556,23 @@ function drawConnection(ctx, n1, n2, time, highlight = false) {
     ctx.lineTo(n2.x, n2.y);
     ctx.strokeStyle = color;
     ctx.shadowColor = shadow;
-    ctx.shadowBlur = highlight ? 18 + 10 * pulse : (sameOwner ? 14 : 6 + 6 * pulse);
-    ctx.lineWidth = highlight ? 5 + 2 * pulse : (sameOwner ? 4 : 3.5 + 1.2 * pulse);
+    ctx.shadowBlur = sameOwner ? 14 : 6 + 6 * pulse;
+    ctx.lineWidth = sameOwner ? 4 : 3.5 + 1.2 * pulse;
     ctx.stroke();
-    // Внутренняя "нить"
     ctx.shadowBlur = 0;
-    ctx.lineWidth = highlight ? 2.5 : 1.5;
-    ctx.strokeStyle = highlight ? '#fff0fa' : '#fff';
-    ctx.globalAlpha = highlight ? 1 : (0.7 + 0.3 * pulse);
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = '#fff';
+    ctx.globalAlpha = 0.7 + 0.3 * pulse;
     ctx.stroke();
     ctx.restore();
 }
 
-function drawEnemy(ctx, node, type = 'patrol', enemy = null) {
+function drawEnemy(ctx, node, type, enemy) {
     ctx.save();
     ctx.beginPath();
     ctx.arc(node.x, node.y, 13, 0, 2 * Math.PI);
-    if (type === 'hunter') {
-        ctx.fillStyle = '#b388ff';
-        ctx.shadowColor = '#b388ff';
-    } else {
-        ctx.fillStyle = '#ff1744';
-        ctx.shadowColor = '#ff1744';
-    }
+    if (type === 'hunter') { ctx.fillStyle = '#b388ff'; ctx.shadowColor = '#b388ff'; }
+    else { ctx.fillStyle = '#ff1744'; ctx.shadowColor = '#ff1744'; }
     ctx.shadowBlur = 16;
     ctx.globalAlpha = 0.85;
     ctx.fill();
@@ -657,8 +583,7 @@ function drawEnemy(ctx, node, type = 'patrol', enemy = null) {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(type === 'hunter' ? 'H' : 'E', node.x, node.y+1);
-    // --- stun/glitch effect ---
-    if (enemy && enemy.isStunnedUntil && enemy.isStunnedUntil > Date.now()) {
+    if (enemy && enemy.isStunnedUntil && enemy.isStunnedUntil > performance.now()) {
         ctx.save();
         ctx.globalAlpha = 0.7;
         ctx.strokeStyle = '#00eaff';
@@ -683,21 +608,19 @@ function drawProgramIcon(ctx, node) {
     ctx.font = 'bold 13px sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    // Цвет иконки по типу
     let icon = '?', color = '#fff';
     if (node.program.type === 'miner') { icon = 'M'; color = '#ffd600'; }
     if (node.program.type === 'shield') { icon = 'S'; color = '#00eaff'; }
     if (node.program.type === 'sentry') { icon = 'T'; color = '#00ff90'; }
     ctx.fillStyle = color;
     ctx.fillText(icon, node.x, node.y + 18);
-    // Индикатор уровня
     ctx.font = 'bold 12px sans-serif';
     ctx.fillStyle = '#ffd600';
     ctx.fillText(node.program.level, node.x + 13, node.y + 13);
     ctx.restore();
 }
 
-function drawResourcePanel(ctx, game_state) {
+function drawResourcePanel(ctx) {
     ctx.save();
     ctx.globalAlpha = 0.92;
     ctx.fillStyle = '#222b';
@@ -705,21 +628,19 @@ function drawResourcePanel(ctx, game_state) {
     ctx.globalAlpha = 1;
     ctx.font = 'bold 16px sans-serif';
     ctx.fillStyle = '#fff';
-    ctx.fillText('DP: ' + game_state.dp, 32, 40);
-    ctx.fillText('CPU: ' + game_state.cpu, 32, 62);
-    ctx.fillText('TRACE: ' + Math.floor(game_state.traceLevel) + ' / 200', 32, 80);
-    // HUB CAPTURE
-    if (game_state.hubCaptureActive) {
+    ctx.fillText('DP: ' + gameState.dp, 32, 40);
+    ctx.fillText('CPU: ' + gameState.cpu, 32, 62);
+    ctx.fillText('TRACE: ' + Math.floor(gameState.traceLevel) + ' / 200', 32, 80);
+    if (gameState.hubCaptureActive) {
         ctx.font = 'bold 17px sans-serif';
         ctx.fillStyle = '#ff1744';
-        ctx.fillText('HUB CAPTURE: ' + Math.floor(game_state.hubCaptureProgress*100) + '%', 32, 110);
+        ctx.fillText('HUB CAPTURE: ' + Math.floor(gameState.hubCaptureProgress*100) + '%', 32, 110);
     }
-    // EMP Blast button
     const x = 32, y = 120, w = 180, h = 38;
     ctx.save();
     ctx.beginPath();
     ctx.roundRect(x, y, w, h, 10);
-    ctx.fillStyle = game_state.cpu >= 50 && game_state.empCooldown <= 0 ? '#232b33ee' : '#232b3344';
+    ctx.fillStyle = gameState.cpu >= 50 && gameState.empCooldown <= 0 ? '#232b33ee' : '#232b3344';
     ctx.shadowColor = '#00eaff';
     ctx.shadowBlur = 8;
     ctx.fill();
@@ -730,43 +651,34 @@ function drawResourcePanel(ctx, game_state) {
     ctx.fillStyle = '#fff';
     ctx.font = 'bold 16px sans-serif';
     let label = 'EMP Blast (50 CPU)';
-    if (game_state.empCooldown > 0) {
-        label += ` (${Math.ceil(game_state.empCooldown/1000)}s)`;
+    if (gameState.empCooldown > 0) {
+        label += ` (${Math.ceil(gameState.empCooldown/1000)}s)`;
     }
     ctx.fillText(label, x + 16, y + h/2);
-    uiState.uiButtons['emp'] = { x, y, w, h, type: 'emp' };
+    uiButtons['emp'] = { x, y, w, h, type: 'emp' };
     ctx.restore();
     ctx.restore();
 }
 
-function drawNode(ctx, node, selected = false, highlight = false) {
+function drawNode(ctx, node) {
     ctx.save();
-    // Пульсация размера
     let base = node.type === 'hub' ? 36 : 18;
     let amp = node.type === 'hub' ? 6 : 1.5;
     let freq = node.type === 'hub' ? 1.5 : 0.7;
     let phase = node.randomPhase || 0;
     let time = performance.now() / 1000;
+    let highlight = (gameState.selectedNodeId === node.id) || (hoveredNodeId === node.id);
     if (highlight) { amp *= 1.7; base += 2; }
     let size = base + Math.sin(time * freq + phase) * amp;
     ctx.beginPath();
     ctx.arc(node.x, node.y, size, 0, 2 * Math.PI);
-    // Цвет и свечение по owner и типу
     let fill, shadow, stroke;
-    if (node.type === 'cpu_node') {
-        fill = '#b388ff'; shadow = '#e1bfff'; stroke = '#b388ff';
-    } else if (node.type === 'data_cache') {
-        fill = '#fff'; shadow = '#00eaff'; stroke = '#00eaff';
-    } else if (node.owner === 'player') {
-        fill = '#ff9100'; shadow = '#ffb347'; stroke = '#ff9100';
-    } else if (node.owner === 'enemy') {
-        fill = '#ff1744'; shadow = '#ff668a'; stroke = '#ff1744';
-    } else {
-        fill = '#00eaff'; shadow = '#66f6ff'; stroke = '#fff';
-    }
-    if (highlight) {
-        shadow = '#ff1744'; fill = node.type === 'hub' ? '#ff9100' : '#ff1744'; stroke = '#ff1744';
-    }
+    if (node.type === 'cpu_node') { fill = '#b388ff'; shadow = '#e1bfff'; stroke = '#b388ff'; }
+    else if (node.type === 'data_cache') { fill = '#fff'; shadow = '#00eaff'; stroke = '#00eaff'; }
+    else if (node.owner === 'player') { fill = '#ff9100'; shadow = '#ffb347'; stroke = '#ff9100'; }
+    else if (node.owner === 'enemy') { fill = '#ff1744'; shadow = '#ff668a'; stroke = '#ff1744'; }
+    else { fill = '#00eaff'; shadow = '#66f6ff'; stroke = '#fff'; }
+    if (highlight) { shadow = '#ff1744'; fill = node.type === 'hub' ? '#ff9100' : '#ff1744'; stroke = '#ff1744'; }
     ctx.shadowColor = shadow;
     ctx.shadowBlur = highlight ? 32 : (node.type === 'hub' ? 24 : 18);
     ctx.fillStyle = fill;
@@ -776,7 +688,6 @@ function drawNode(ctx, node, selected = false, highlight = false) {
     ctx.lineWidth = highlight ? 4 : 3;
     ctx.strokeStyle = stroke;
     ctx.stroke();
-    // Подпись для спец.ноды
     if (node.type === 'cpu_node') {
         ctx.font = 'bold 13px sans-serif';
         ctx.fillStyle = '#fff';
@@ -791,7 +702,6 @@ function drawNode(ctx, node, selected = false, highlight = false) {
         ctx.textBaseline = 'middle';
         ctx.fillText('DATA', node.x, node.y);
     }
-    // Прогресс-бар захвата
     if (node.isCapturing) {
         ctx.save();
         ctx.beginPath();
@@ -802,7 +712,6 @@ function drawNode(ctx, node, selected = false, highlight = false) {
         ctx.stroke();
         ctx.restore();
     }
-    // Decapturing (врагом)
     if (node.owner === 'player' && node.captureProgress < 1 && !node.isCapturing) {
         ctx.save();
         ctx.beginPath();
@@ -813,7 +722,6 @@ function drawNode(ctx, node, selected = false, highlight = false) {
         ctx.stroke();
         ctx.restore();
     }
-    // Прогресс-бар щита
     if (node.owner === 'player' && node.program && node.program.type === 'shield' && node.shieldHealth > 0) {
         ctx.save();
         ctx.beginPath();
@@ -828,7 +736,6 @@ function drawNode(ctx, node, selected = false, highlight = false) {
         ctx.setLineDash([]);
         ctx.restore();
     }
-    // Прогресс-бар Sentry (зелёный, если установлен)
     if (node.owner === 'player' && node.program && node.program.type === 'sentry') {
         ctx.save();
         ctx.beginPath();
@@ -842,7 +749,6 @@ function drawNode(ctx, node, selected = false, highlight = false) {
         ctx.setLineDash([]);
         ctx.restore();
     }
-    // Прогресс-бар Miner (жёлтый, пульсирующий)
     if (node.owner === 'player' && node.program && node.program.type === 'miner') {
         ctx.save();
         ctx.beginPath();
@@ -856,7 +762,6 @@ function drawNode(ctx, node, selected = false, highlight = false) {
         ctx.setLineDash([]);
         ctx.restore();
     }
-    // Текст для HUB
     if (node.type === 'hub') {
         ctx.font = 'bold 18px sans-serif';
         ctx.fillStyle = '#fff';
@@ -865,10 +770,8 @@ function drawNode(ctx, node, selected = false, highlight = false) {
         ctx.fillText('HUB', node.x, node.y);
     }
     ctx.restore();
-    // Программа
     drawProgramIcon(ctx, node);
-    // Прогресс-бар финального захвата HUB
-    if (node.type === 'hub' && game_state.hubCaptureActive) {
+    if (node.type === 'hub' && gameState.hubCaptureActive) {
         ctx.save();
         ctx.beginPath();
         ctx.lineWidth = 11;
@@ -876,18 +779,17 @@ function drawNode(ctx, node, selected = false, highlight = false) {
         ctx.shadowColor = '#ff1744';
         ctx.shadowBlur = 24;
         ctx.globalAlpha = 0.92;
-        ctx.arc(node.x, node.y, size + 26, -Math.PI/2, -Math.PI/2 + 2 * Math.PI * game_state.hubCaptureProgress);
+        ctx.arc(node.x, node.y, size + 26, -Math.PI/2, -Math.PI/2 + 2 * Math.PI * gameState.hubCaptureProgress);
         ctx.stroke();
         ctx.shadowBlur = 0;
         ctx.lineWidth = 4.5;
         ctx.strokeStyle = '#ff1744';
         ctx.globalAlpha = 0.7;
         ctx.beginPath();
-        ctx.arc(node.x, node.y, size + 32, -Math.PI/2, -Math.PI/2 + 2 * Math.PI * game_state.hubCaptureProgress);
+        ctx.arc(node.x, node.y, size + 32, -Math.PI/2, -Math.PI/2 + 2 * Math.PI * gameState.hubCaptureProgress);
         ctx.stroke();
         ctx.restore();
     }
-    // Индикатор угрозы (Hunter targeting)
     if (node.isTargeted) {
         ctx.save();
         ctx.beginPath();
@@ -902,27 +804,8 @@ function drawNode(ctx, node, selected = false, highlight = false) {
     }
 }
 
-function getRandomPath(nodesObj, startId, length = 5) {
-    // Простой случайный путь по соседям
-    let path = [startId];
-    let current = startId;
-    for (let i = 0; i < length; i++) {
-        const neighbors = nodesObj[current].neighbors.filter(nid => !path.includes(nid));
-        if (neighbors.length === 0) break;
-        const next = neighbors[Math.floor(Math.random() * neighbors.length)];
-        path.push(next);
-        current = next;
-    }
-    return path;
-}
-
-function drawProgramUI(ctx, selectedNode) {
-    if (!selectedNode) return;
-    ctx.save();
-    ctx.font = 'bold 16px sans-serif';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    // --- Смещение UI внутрь canvas ---
+function calculateProgramUIButtons(selectedNode) {
+    if (!selectedNode) return {};
     let offsetX = 40;
     let offsetY = 0;
     const btnW = 140, btnH = 38, btnW2 = 120, btnH2 = 36, spacing = 12;
@@ -934,7 +817,54 @@ function drawProgramUI(ctx, selectedNode) {
     if (menuRight > canvas.width - 10) offsetX -= (menuRight - (canvas.width - 10));
     if (menuTop < 10) offsetY += (10 - menuTop);
     if (menuBottom > canvas.height - 10) offsetY -= (menuBottom - (canvas.height - 10));
-    uiButtons = {};
+    const buttons = {};
+    if (selectedNode.program) {
+        let prog = selectedNode.program;
+        let baseCost = prog.type === 'miner' ? 20 : prog.type === 'shield' ? 30 : 40;
+        let cost = baseCost * prog.level;
+        let cpuCost = 5 * prog.level;
+        const x = selectedNode.x + offsetX;
+        const y = selectedNode.y - btnH/2 + offsetY;
+        buttons['upgrade'] = { x, y, w: btnW, h: btnH, type: 'upgrade', cost, cpuCost };
+    }
+    const buttonData = [];
+    if (selectedNode.type !== 'cpu_node') {
+        buttonData.push({ label: 'Miner', cost: 20, type: 'miner' });
+        buttonData.push({ label: 'Shield', cost: 30, type: 'shield' });
+        buttonData.push({ label: 'Sentry', cost: 40, type: 'sentry' });
+    }
+    if (selectedNode.type === 'cpu_node') {
+        buttonData.push({ label: 'Overclocker', cost: 50, type: 'overclocker' });
+    }
+    const startX = selectedNode.x + offsetX;
+    const startY = selectedNode.y - ((btnH2 + spacing) * buttonData.length - spacing) / 2 + offsetY;
+    for (let i = 0; i < buttonData.length; i++) {
+        const btn = buttonData[i];
+        const x = startX;
+        const y = startY + i * (btnH2 + spacing);
+        buttons[btn.type] = { x, y, w: btnW2, h: btnH2, type: btn.type, cost: btn.cost };
+    }
+    return buttons;
+}
+
+function drawProgramUI(ctx, selectedNode) {
+    if (!selectedNode) return;
+    ctx.save();
+    ctx.font = 'bold 16px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    let offsetX = 40;
+    let offsetY = 0;
+    const btnW = 140, btnH = 38, btnW2 = 120, btnH2 = 36, spacing = 12;
+    let totalHeight = btnH2 * 3 + spacing * 2;
+    if (selectedNode.type === 'cpu_node') totalHeight += btnH2 + spacing;
+    let menuRight = selectedNode.x + offsetX + btnW;
+    let menuTop = selectedNode.y - totalHeight/2;
+    let menuBottom = selectedNode.y + totalHeight/2;
+    if (menuRight > canvas.width - 10) offsetX -= (menuRight - (canvas.width - 10));
+    if (menuTop < 10) offsetY += (10 - menuTop);
+    if (menuBottom > canvas.height - 10) offsetY -= (menuBottom - (canvas.height - 10));
+    uiButtons = calculateProgramUIButtons(selectedNode);
     if (selectedNode.program) {
         let prog = selectedNode.program;
         let baseCost = prog.type === 'miner' ? 20 : prog.type === 'shield' ? 30 : 40;
@@ -955,9 +885,7 @@ function drawProgramUI(ctx, selectedNode) {
         ctx.fillStyle = '#fff';
         let label = prog.type === 'miner' ? 'Miner' : prog.type === 'shield' ? 'Shield' : 'Sentry';
         ctx.fillText(`Upgrade ${label} (Lvl ${prog.level+1}, ${cost} DP, ${cpuCost} CPU)`, x + 16, y + btnH/2);
-        uiButtons['upgrade'] = { x, y, w: btnW, h: btnH, type: 'upgrade', cost, cpuCost };
     }
-    // Кнопки установки
     const buttonData = [];
     if (selectedNode.type !== 'cpu_node') {
         buttonData.push({ label: 'Miner', cost: 20, type: 'miner' });
@@ -985,8 +913,61 @@ function drawProgramUI(ctx, selectedNode) {
         ctx.stroke();
         ctx.fillStyle = '#fff';
         ctx.fillText(`${btn.label} (${btn.cost} DP)`, x + 16, y + btnH2 / 2);
-        uiButtons[btn.type] = { x, y, w: btnW2, h: btnH2, type: btn.type };
     }
+    ctx.restore();
+}
+
+function drawMenu(ctx) {
+    ctx.save();
+    ctx.fillStyle = '#181c22ee';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.font = 'bold 38px sans-serif';
+    ctx.fillStyle = '#ffd600';
+    ctx.textAlign = 'center';
+    ctx.fillText('CYBER NETWORK', canvas.width/2, canvas.height/2-60);
+    ctx.font = 'bold 22px sans-serif';
+    ctx.fillStyle = '#fff';
+    ctx.fillText('AI-Driven Edition', canvas.width/2, canvas.height/2-20);
+    ctx.font = 'bold 20px sans-serif';
+    ctx.fillStyle = '#00eaff';
+    ctx.fillText('Нажмите "Start New Game"', canvas.width/2, canvas.height/2+30);
+    ctx.font = 'bold 24px sans-serif';
+    ctx.fillStyle = '#ffd600';
+    ctx.fillRect(canvas.width/2-90, canvas.height/2+60, 180, 48);
+    ctx.fillStyle = '#232b33';
+    ctx.fillText('Start New Game', canvas.width/2, canvas.height/2+90);
+    ctx.restore();
+}
+
+function drawEndScreen(ctx, win, score) {
+    ctx.save();
+    ctx.fillStyle = win ? '#00ff90ee' : '#ff1744ee';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.font = 'bold 48px sans-serif';
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.fillText(win ? 'YOU WIN!' : 'GAME OVER', canvas.width/2, canvas.height/2-60);
+    ctx.font = 'bold 24px sans-serif';
+    ctx.fillStyle = '#ffd600';
+    ctx.fillText('Score: ' + score, canvas.width/2, canvas.height/2-10);
+    ctx.font = 'bold 22px sans-serif';
+    ctx.fillStyle = '#232b33';
+    ctx.fillRect(canvas.width/2-80, canvas.height/2+30, 160, 44);
+    ctx.fillStyle = '#ffd600';
+    ctx.fillText('Play Again', canvas.width/2, canvas.height/2+60);
+    ctx.restore();
+}
+
+function drawHint(ctx, text) {
+    if (!text) return;
+    ctx.save();
+    ctx.globalAlpha = 0.92;
+    ctx.fillStyle = '#232b33ee';
+    ctx.fillRect(20, canvas.height-80, 420, 44);
+    ctx.font = 'bold 18px sans-serif';
+    ctx.fillStyle = '#ffd600';
+    ctx.textAlign = 'left';
+    ctx.fillText(text, 36, canvas.height-50);
     ctx.restore();
 }
 
@@ -995,33 +976,33 @@ function render() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     const time = Date.now();
     // Соединения
-    for (const id in game_state.nodes) {
-        const node = game_state.nodes[id];
+    for (const id in gameState.nodes) {
+        const node = gameState.nodes[id];
         for (const nId of node.neighbors) {
             if (id < nId) {
-                drawConnection(ctx, node, game_state.nodes[nId], time, false);
+                drawConnection(ctx, node, gameState.nodes[nId], time);
             }
         }
     }
     // Ноды
-    for (const id in game_state.nodes) {
-        let selected = (id === uiState.selectedNodeId);
-        drawNode(ctx, game_state.nodes[id], selected, false);
+    for (const id in gameState.nodes) {
+        let selected = (id === gameState.selectedNodeId);
+        drawNode(ctx, gameState.nodes[id]);
     }
     // Враги
-    for (const enemy of game_state.enemies) {
-        const node = game_state.nodes[enemy.currentNodeId];
+    for (const enemy of gameState.enemies) {
+        const node = gameState.nodes[enemy.currentNodeId];
         if (node) drawEnemy(ctx, node, enemy.type, enemy);
     }
     // Панель ресурсов
-    drawResourcePanel(ctx, game_state);
+    drawResourcePanel(ctx);
     // --- UI программ ---
-    if (uiState.selectedNodeId) {
-        const selectedNode = game_state.nodes[uiState.selectedNodeId];
+    if (gameState.selectedNodeId) {
+        const selectedNode = gameState.nodes[gameState.selectedNodeId];
         drawProgramUI(ctx, selectedNode);
     }
     // --- Визуальные эффекты Sentry ---
-    for (const shot of sentryShots) {
+    for (const shot of visualEffects.sentryShots) {
         const t = (performance.now() - shot.time) / 200;
         if (t > 1) continue;
         // Неоново-зелёный лазер
@@ -1069,7 +1050,7 @@ function render() {
         ctx.restore();
     }
     // --- Вспышки на врагах ---
-    for (const flash of sentryFlashes) {
+    for (const flash of visualEffects.sentryFlashes) {
         const t = (performance.now() - flash.time) / 180;
         if (t > 1) continue;
         ctx.save();
@@ -1083,7 +1064,7 @@ function render() {
         ctx.restore();
     }
     // --- Взрывы врагов ---
-    for (const boom of enemyExplosions) {
+    for (const boom of visualEffects.enemyExplosions) {
         const t = (performance.now() - boom.time) / 420;
         if (t > 1) continue;
         ctx.save();
@@ -1103,7 +1084,7 @@ function render() {
         ctx.restore();
     }
     // Очищаем старые взрывы
-    enemyExplosions = enemyExplosions.filter(boom => (performance.now() - boom.time) < 420);
+    visualEffects.enemyExplosions = visualEffects.enemyExplosions.filter(boom => (performance.now() - boom.time) < 420);
     // --- Screen shake ---
     let shakeX = 0, shakeY = 0;
     if (screenShake.duration > 0) {
@@ -1116,426 +1097,176 @@ function render() {
         ctx.restore();
     }
     // --- Очистка массивов эффектов ---
-    sentryShots = sentryShots.filter(shot => (performance.now() - shot.time) < 400);
-    sentryFlashes = sentryFlashes.filter(flash => (performance.now() - flash.time) < 300);
-    enemyExplosions = enemyExplosions.filter(boom => (performance.now() - boom.time) < 420);
+    visualEffects.sentryShots = visualEffects.sentryShots.filter(shot => (performance.now() - shot.time) < 400);
+    visualEffects.sentryFlashes = visualEffects.sentryFlashes.filter(flash => (performance.now() - flash.time) < 300);
+    visualEffects.enemyExplosions = visualEffects.enemyExplosions.filter(boom => (performance.now() - boom.time) < 420);
     isRendering = false;
 }
 
-function mainLoop() {
-    if (gameOver) {
-        uiState.selectedNodeId = null;
-        uiButtons = {};
-        return;
-    }
-    // --- God mode: пропуск затрат, атак, traceLevel ---
-    if (godMode) {
-        // Не увеличиваем traceLevel, не тратим ресурсы, не атакуют враги
-        game_state.traceLevel = Math.max(game_state.traceLevel, 0);
-    }
-    // --- Победа: захват HUB ---
-    if (game_state.hubCaptureActive) {
-        // Усиливаем угрозу
-        game_state.traceLevel = Math.max(game_state.traceLevel, 90);
-        // Ускоряем спавн врагов
-        lastEnemySpawn -= 2500; // ускоряем таймер (спавн каждые ~2.5 сек)
-        // Прогресс захвата
-        game_state.hubCaptureProgress += 1 / (60 * 60); // ~60 сек до победы
-        if (game_state.hubCaptureProgress >= 1) {
-            game_state.hubCaptureProgress = 1;
-            gameOver = true;
-            alert('YOU WIN!');
-            return;
+function update(dt, now) {
+    // FSM: MENU
+    if (gameState.phase === 'MENU') return;
+    // FSM: END_SCREEN
+    if (gameState.phase === 'END_SCREEN') return;
+    // FSM: PLAYING
+    // 1. Таймеры и cooldowns
+    if (gameState.empCooldown > 0) gameState.empCooldown -= dt;
+    if (gameState.empCooldown < 0) gameState.empCooldown = 0;
+    // 2. Враги
+    for (const enemy of gameState.enemies) {
+        if (enemy.isStunnedUntil && enemy.isStunnedUntil > now) continue;
+        // AI: движение к цели
+        if (!enemy.path || enemy.path.length === 0) {
+            // Найти новую цель (игровая логика)
+            // ...
         }
+        // Перемещение по path
+        // ...
+        // Атака/деконтроль
+        // ...
     }
-    // --- Проверка Game Over ---
-    if (game_state.traceLevel >= 200) {
-        alert('GAME OVER: TraceLevel достиг максимума!');
-        gameOver = true;
-        return;
-    }
-    if (game_state.playerRootNodeId) {
-        const root = game_state.nodes[game_state.playerRootNodeId];
-        if (!root || root.owner !== 'player') {
-            alert('GAME OVER: Потеряна корневая нода!');
-            gameOver = true;
-            return;
-        }
-    }
-    // --- Захват нод
-    for (const id in game_state.nodes) {
-        const node = game_state.nodes[id];
-        if (!node) continue;
-        if (node.isCapturing) {
-            node.captureProgress += 0.012;
-            if (node.captureProgress >= 1) {
-                node.isCapturing = false;
-                node.captureProgress = 0;
-                node.owner = 'player';
-                if (!game_state.playerRootNodeId) game_state.playerRootNodeId = node.id;
-                game_state.traceLevel += 1; // +1 за захват
-                // --- Data Cache бонус ---
-                if (node.type === 'data_cache') {
-                    game_state.dp += 100;
-                    node.type = 'data'; // чтобы бонус не выдавался повторно
-                }
-                console.log('Node captured:', node.id);
+    // 3. Программы
+    for (const id in gameState.nodes) {
+        const node = gameState.nodes[id];
+        if (node.program) {
+            // Miner: добыча DP
+            if (node.program.type === 'miner') {
+                let reward = Math.pow(node.program.level, 1.5);
+                gameState.dp += reward * dt / 1000;
             }
-        }
-    }
-    // --- Ресурсы от miner ---
-    const now = Date.now();
-    if (now - lastMinerTick > 1000) {
-        let miners = 0;
-        for (const id in game_state.nodes) {
-            const node = game_state.nodes[id];
-            if (!node) continue;
-            if (node.owner === 'player' && node.program && node.program.type === 'miner') {
-                game_state.dp += 3 + 2 * (node.program.level - 1);
-                miners++;
+            // Shield: восстановление щита
+            if (node.program.type === 'shield') {
+                if (!node.maxShieldHealth) node.maxShieldHealth = 100 * node.program.level;
+                if (!node.shieldHealth) node.shieldHealth = node.maxShieldHealth;
+                node.shieldHealth += 8 * dt / 1000;
+                if (node.shieldHealth > node.maxShieldHealth) node.shieldHealth = node.maxShieldHealth;
             }
-        }
-        if (miners > 0) console.log('DP from miners:', miners, 'Total DP:', game_state.dp);
-        lastMinerTick = now;
-    }
-    // --- Враги ---
-    if (now - lastEnemySpawn > (game_state.hubCaptureActive ? 2500 : 5000)) {
-        // Спавним врага только на нейтральных или вражеских нодах, не на HUB, и не ближе 4 шагов от HUB
-        function bfsDistance(nodes, from, to) {
-            if (from === to) return 0;
-            const queue = [[from, 0]];
-            const visited = new Set([from]);
-            while (queue.length) {
-                const [curr, dist] = queue.shift();
-                for (const nId of nodes[curr].neighbors) {
-                    if (nId === to) return dist + 1;
-                    if (!visited.has(nId)) {
-                        visited.add(nId);
-                        queue.push([nId, dist + 1]);
-                    }
-                }
-            }
-            return Infinity;
-        }
-        const spawnableNodes = Object.values(game_state.nodes).filter(n => n.owner !== 'player' && n.type !== 'hub' && bfsDistance(game_state.nodes, n.id, 'hub') >= 4);
-        if (spawnableNodes.length > 0) {
-            const start = spawnableNodes[Math.floor(Math.random() * spawnableNodes.length)].id;
-            if (!game_state.hubCaptureActive && game_state.traceLevel < 40) {
-                // Обычный патрульный враг
-                const path = getRandomPath(game_state.nodes, start, 6 + Math.floor(Math.random()*4));
-                const enemy = new Enemy('enemy' + (enemyIdCounter++), start, path, 'patrol');
-                game_state.enemies.push(enemy);
-                console.log('Enemy spawned:', enemy.id, 'path:', path);
-            } else {
-                // Hunter: ищет ближайшую ноду игрока (или соседа HUB в финале)
-                let targets;
-                if (game_state.hubCaptureActive) {
-                    // Все новые враги идут к соседям HUB
-                    const hub = game_state.nodes['hub'];
-                    targets = hub.neighbors.filter(nid => game_state.nodes[nid].owner === 'player');
-                } else {
-                    targets = Object.values(game_state.nodes).filter(n => n.owner === 'player').map(n => n.id);
-                }
-                if (targets.length > 0) {
-                    // Находим ближайшую к старту
-                    let minDist = Infinity, target = null;
-                    for (const tid of targets) {
-                        const n = game_state.nodes[tid];
-                        const d = getDistance(game_state.nodes[start].x, game_state.nodes[start].y, n.x, n.y);
-                        if (d < minDist) { minDist = d; target = n.id; }
-                    }
-                    const path = findPathBFS(game_state.nodes, start, target) || [start];
-                    // --- Threat indicator ---
-                    if (game_state.nodes[target]) {
-                        game_state.nodes[target].isTargeted = true;
-                        game_state.nodes[target].targetedUntil = Date.now() + 1000;
-                    }
-                    const enemy = new Enemy('hunter' + (enemyIdCounter++), start, path, 'hunter');
-                    game_state.enemies.push(enemy);
-                    console.log('Hunter spawned:', enemy.id, 'path:', path);
-                }
-            }
-        }
-        lastEnemySpawn = now;
-    }
-    // --- Движение врагов ---
-    for (const enemy of game_state.enemies) {
-        if (!enemy) continue;
-        // --- Диагностика зависания ---
-        if (enemy.pathStep >= enemy.path.length - 1) {
-            // Если враг не может двигаться дальше, но цель ещё существует — пробуем пересчитать путь
-            if (enemy.type === 'hunter') {
-                // Найти новую цель (ближайшая нода игрока)
-                let targets = Object.values(game_state.nodes).filter(n => n && n.owner === 'player').map(n => n.id);
-                if (targets.length > 0) {
-                    let minDist = Infinity, target = null;
-                    for (const tid of targets) {
-                        const n = game_state.nodes[tid];
-                        if (!n) continue;
-                        const d = getDistance(game_state.nodes[enemy.currentNodeId].x, game_state.nodes[enemy.currentNodeId].y, n.x, n.y);
-                        if (d < minDist) { minDist = d; target = n.id; }
-                    }
-                    const newPath = findPathBFS(game_state.nodes, enemy.currentNodeId, target);
-                    if (newPath && newPath.length > 1) {
-                        enemy.path = newPath;
-                        enemy.pathStep = 0;
-                        console.log('Hunter', enemy.id, 'recalculated path:', newPath);
-                    } else {
-                        // Если путь невозможен — удаляем врага
-                        enemy.health = 0;
-                        console.log('Enemy', enemy.id, 'stuck and removed (no path)');
-                    }
-                } else {
-                    // Нет целей — удаляем врага
-                    enemy.health = 0;
-                    console.log('Enemy', enemy.id, 'stuck and removed (no targets)');
-                }
-            } else {
-                // Патрульный: пробуем случайный путь
-                const newPath = getRandomPath(game_state.nodes, enemy.currentNodeId, 5 + Math.floor(Math.random()*3));
-                if (newPath && newPath.length > 1) {
-                    enemy.path = newPath;
-                    enemy.pathStep = 0;
-                    console.log('Patrol', enemy.id, 'recalculated path:', newPath);
-                } else {
-                    enemy.health = 0;
-                    console.log('Enemy', enemy.id, 'stuck and removed (no random path)');
-                }
-            }
-            continue;
-        }
-        if (enemy.pathStep < enemy.path.length - 1) {
-            if (!enemy.lastMove || now - enemy.lastMove > 1200) {
-                enemy.pathStep++;
-                enemy.currentNodeId = enemy.path[enemy.pathStep];
-                enemy.lastMove = now;
-                console.log('Enemy', enemy.id, 'moved to', enemy.currentNodeId);
-            }
-        }
-        // Проверка на de-capturing
-        const node = game_state.nodes[enemy.currentNodeId];
-        if (!node) continue;
-        if (node.owner === 'player') {
-            const enemiesOnNode = game_state.enemies.filter(enemy => enemy.currentNodeId === node.id);
-            if (enemiesOnNode.length > 0) {
-                // Суммарный урон по щиту
-                if (node.program && node.program.type === 'shield' && node.shieldHealth > 0) {
-                    if (!godMode) node.shieldHealth -= 0.7 * enemiesOnNode.length;
-                    if (node.shieldHealth < 0) node.shieldHealth = 0;
-                    enemiesOnNode.forEach(enemy => enemy.decapturing = true);
-                    continue;
-                }
-                // Decapturing прогресс
-                if (!node.program || (node.program.type !== 'sentry')) {
-                    node.isCapturing = false;
-                    if (!godMode) node.captureProgress -= 0.02 * enemiesOnNode.length;
-                    if (node.captureProgress < 0) node.captureProgress = 0;
-                    if (node.captureProgress === 0) {
-                        // --- 4. Жёсткий сброс статусов при потере ---
-                        node.owner = 'neutral';
-                        node.program = null;
-                        node.shieldHealth = 0;
-                        node.maxShieldHealth = 100;
-                        node.isCapturing = false;
-                        node.captureProgress = 0;
-                        if (uiState.selectedNodeId === node.id) {
-                            uiState.selectedNodeId = null;
-                            uiButtons = {};
+            // Sentry: атака врагов
+            if (node.program.type === 'sentry') {
+                for (const enemy of gameState.enemies) {
+                    if (enemy.currentNodeId === id) {
+                        let armor = enemy.armor || 0;
+                        let level = node.program.level;
+                        let dmg = Math.pow(level, 1.5);
+                        if (armor > level) dmg *= 0.1;
+                        enemy.health -= dmg * dt / 1000;
+                        if (enemy.health <= 0) {
+                            gameState.dp += Math.pow(level, 1.5);
+                            enemy.isDead = true;
                         }
-                        recalcAllEnemyPaths();
-                        triggerScreenShake(7, 250);
                     }
-                    enemiesOnNode.forEach(enemy => enemy.decapturing = true);
-                    continue;
-                } else {
-                    enemiesOnNode.forEach(enemy => enemy.decapturing = false);
                 }
             }
         }
-    }
-    // --- Логика Sentry с diminishing returns ---
-    sentryShots = [];
-    sentryFlashes = [];
-    const sentryRange = 200;
-    for (const id in game_state.nodes) {
-        const node = game_state.nodes[id];
-        if (!node) continue;
-        if (node.owner === 'player' && node.program && node.program.type === 'sentry') {
-            // Считаем nearbySentryCount
-            let nearbySentryCount = 0;
-            for (const otherId in game_state.nodes) {
-                if (otherId === id) continue;
-                const other = game_state.nodes[otherId];
-                if (!other) continue;
-                if (other.owner === 'player' && other.program && other.program.type === 'sentry') {
-                    const dist = getDistance(node.x, node.y, other.x, other.y);
-                    if (dist < 120) nearbySentryCount++;
-                }
-            }
-            let nearest = null;
-            let minDist = Infinity;
-            for (const enemy of game_state.enemies) {
-                if (!enemy) continue;
-                const enemyNode = game_state.nodes[enemy.currentNodeId];
-                if (!enemyNode) continue;
-                const dist = getDistance(node.x, node.y, enemyNode.x, enemyNode.y);
-                if (dist < sentryRange && dist < minDist) {
-                    minDist = dist;
-                    nearest = enemy;
-                }
-            }
-            if (nearest) {
-                // Diminishing returns + апгрейд-бафф
-                let baseDmg = 2.5 + 2 * (node.program.level - 1);
-                let dmg = baseDmg * (1 / (1 + nearbySentryCount * 0.5));
-                nearest.health -= dmg;
-                const targetNode = game_state.nodes[nearest.currentNodeId];
-                if (targetNode) {
-                    sentryShots.push({
-                        from: { x: node.x, y: node.y },
-                        to: { x: targetNode.x, y: targetNode.y },
-                        time: performance.now()
-                    });
-                    sentryFlashes.push({
-                        x: targetNode.x,
-                        y: targetNode.y,
-                        time: performance.now()
-                    });
-                }
+        // Захват ноды
+        if (node.isCapturing) {
+            node.captureProgress += dt / 2000;
+            if (node.captureProgress >= 1) {
+                node.captureProgress = 1;
+                node.isCapturing = false;
+                node.owner = 'player';
+                gameState.dp += 5;
             }
         }
     }
-    // --- Удаление уничтоженных врагов и награда ---
-    const before = game_state.enemies.length;
-    game_state.enemies = game_state.enemies.filter(enemy => {
-        if (!enemy) return false;
-        if (enemy.health > 0) return true;
-        // Награда за уничтожение врага
-        game_state.dp += 10;
-        // Взрыв на месте врага
-        const node = game_state.nodes[enemy.currentNodeId];
-        if (node) {
-            enemyExplosions.push({
-                x: node.x,
-                y: node.y,
-                time: performance.now()
+    // Удаление мёртвых врагов
+    gameState.enemies = gameState.enemies.filter(e => !e.isDead);
+    // 4. Захват HUB
+    if (gameState.hubCaptureActive) {
+        gameState.hubCaptureProgress += dt / 8000;
+        if (gameState.hubCaptureProgress >= 1) {
+            gameState.hubCaptureProgress = 1;
+            gameState.phase = 'END_SCREEN';
+            gameState.win = true;
+            gameState.dp += 200;
+        }
+    }
+    // 5. Trace Level
+    gameState.traceLevel += dt / 12000;
+    if (gameState.traceLevel >= 200) {
+        gameState.phase = 'END_SCREEN';
+        gameState.win = false;
+    }
+    // 6. Спавн врагов (пример)
+    if (!gameState.lastEnemySpawn) gameState.lastEnemySpawn = now;
+    if (now - gameState.lastEnemySpawn > 4000) {
+        // Спавн обычного врага
+        gameState.enemies.push({
+            type: 'patrol',
+            currentNodeId: 'n1',
+            hp: 10,
+            armor: 0,
+        });
+        // Armored Hunter при trace > 80
+        if (gameState.traceLevel > 80) {
+            gameState.enemies.push({
+                type: 'hunter',
+                currentNodeId: 'n2',
+                hp: 30,
+                armor: 2,
             });
-            triggerScreenShake(5, 150);
         }
-        game_state.traceLevel += 2; // +2 за уничтожение врага Sentry
-        return false;
-    });
-    // --- Shield: сила щита зависит от уровня ---
-    for (const id in game_state.nodes) {
-        const node = game_state.nodes[id];
-        if (node.owner === 'player' && node.program && node.program.type === 'shield') {
-            node.maxShieldHealth = 100 * node.program.level;
-            if (node.shieldHealth > node.maxShieldHealth) node.shieldHealth = node.maxShieldHealth;
-        }
+        gameState.lastEnemySpawn = now;
     }
-    // --- Overclocker: +1 CPU/сек на cpu_node ---
-    if (now - (mainLoop.lastCpuTick || 0) > 1000) {
-        for (const id in game_state.nodes) {
-            const node = game_state.nodes[id];
-            if (node.owner === 'player' && node.program && node.program.type === 'overclocker') {
-                game_state.cpu += 1 * node.program.level;
-            }
-        }
-        mainLoop.lastCpuTick = now;
+    // 7. Победа/поражение (доп. условия)
+    // ...
+}
+
+function mainLoop() {
+    if (gameState.phase === 'MENU') {
+        drawMenu(ctx);
+        requestAnimationFrame(mainLoop);
+        return;
     }
-    // --- Сброс угрозы с нод ---
-    for (const id in game_state.nodes) {
-        const node = game_state.nodes[id];
-        if (node && node.isTargeted && Date.now() > node.targetedUntil) node.isTargeted = false;
+    if (gameState.phase === 'END_SCREEN') {
+        render();
+        drawEndScreen(ctx, gameState.win, gameState.dp);
+        requestAnimationFrame(mainLoop);
+        return;
     }
-    // --- God mode: пропуск затрат, атак, traceLevel ---
-    if (godMode) {
-        // Не увеличиваем traceLevel, не тратим ресурсы, не атакуют враги
-        game_state.traceLevel = Math.max(game_state.traceLevel, 0);
-    } else {
-        // Обычный рост traceLevel
-        game_state.traceLevel += 0.005;
-    }
-    // --- В mainLoop ---
-    if (game_state.empCooldown > 0) {
-        game_state.empCooldown -= 16;
-        if (game_state.empCooldown < 0) game_state.empCooldown = 0;
-    }
+    // PLAYING
+    const now = performance.now();
+    const dt = (now - lastTimestamp) / 1000;
+    lastTimestamp = now;
+    update(dt, now);
     render();
-    if (screenShake.duration > 0) {
-        screenShake.duration -= 16; // ~1 кадр
-        if (screenShake.duration < 0) screenShake.duration = 0;
-    }
     requestAnimationFrame(mainLoop);
 }
 
-function recalcAllEnemyPaths() {
-    for (const enemy of game_state.enemies) {
-        if (!enemy) continue;
-        // Найти ближайшую цель (игрока) для hunter, случайную для patrol
-        if (enemy.type === 'hunter') {
-            let targets = Object.values(game_state.nodes).filter(n => n && n.owner === 'player').map(n => n.id);
-            if (targets.length > 0) {
-                let minDist = Infinity, target = null;
-                for (const tid of targets) {
-                    const n = game_state.nodes[tid];
-                    if (!n) continue;
-                    const d = getDistance(game_state.nodes[enemy.currentNodeId].x, game_state.nodes[enemy.currentNodeId].y, n.x, n.y);
-                    if (d < minDist) { minDist = d; target = n.id; }
-                }
-                const newPath = findPathBFS(game_state.nodes, enemy.currentNodeId, target);
-                if (newPath && newPath.length > 1) {
-                    enemy.path = newPath;
-                    enemy.pathStep = 0;
-                }
-            }
-        } else {
-            const newPath = getRandomPath(game_state.nodes, enemy.currentNodeId, 5 + Math.floor(Math.random()*3));
-            if (newPath && newPath.length > 1) {
-                enemy.path = newPath;
-                enemy.pathStep = 0;
-            }
-        }
-    }
-}
-
 function startNewGame() {
-    game_state.nodes = generateCanvasNetwork();
-    if (game_state.nodes['hub']) {
-        game_state.nodes['hub'].owner = 'player';
-        game_state.playerRootNodeId = 'hub';
+    gameState.nodes = generateCanvasNetwork();
+    if (gameState.nodes['hub']) {
+        gameState.nodes['hub'].owner = 'player';
+        gameState.playerRootNodeId = 'hub';
     }
-    game_state.dp = 100;
-    game_state.cpu = 50;
-    game_state.traceLevel = 0;
-    game_state.enemies = [];
-    game_state.hubCaptureActive = false;
-    game_state.hubCaptureProgress = 0;
-    uiState.selectedNodeId = null;
+    runForceSimulation(gameState.nodes, 250);
+    fixEdgeIntersectionsAndReconnect(gameState.nodes);
+    attachTailsToNetwork(gameState.nodes);
+    gameState.dp = 100;
+    gameState.cpu = 50;
+    gameState.traceLevel = 0;
+    gameState.enemies = [];
+    gameState.selectedNodeId = null;
+    gameState.hubCaptureActive = false;
+    gameState.hubCaptureProgress = 0;
+    gameState.empCooldown = 0;
+    gameState.techLevel = 1;
+    gameState.lastMinerTick = 0;
+    gameState.lastEnemySpawn = 0;
+    gameState.enemyIdCounter = 1;
+    gameState.win = false;
+    gameState.phase = 'PLAYING';
+    lastTimestamp = performance.now();
     uiButtons = {};
-    sentryShots = [];
-    sentryFlashes = [];
-    enemyExplosions = [];
-    gameOver = false;
-    lastMinerTick = 0;
-    lastEnemySpawn = 0;
-    enemyIdCounter = 1;
-    render();
+    visualEffects = { sentryShots: [], sentryFlashes: [], enemyExplosions: [] };
 }
 
-game_state.nodes = generateCanvasNetwork();
-// Делаем HUB стартовой нодой игрока
-if (game_state.nodes['hub']) {
-    game_state.nodes['hub'].owner = 'player';
-    game_state.playerRootNodeId = 'hub';
-}
-runForceSimulation(game_state.nodes, 250);
-fixEdgeIntersectionsAndReconnect(game_state.nodes);
-attachTailsToNetwork(game_state.nodes);
+// --- SOUND SYSTEM ---
+const sound = {
+    play: function(name) {
+        // TODO: подключить реальные звуки
+        console.log('[SOUND]', name);
+    }
+};
+
 mainLoop();
-
-window.addEventListener('resize', () => {
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
-    render();
-}); 
