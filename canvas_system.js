@@ -17,6 +17,7 @@ let gameState = {
     enemyIdCounter: 1,
     win: false,
     phase: 'MENU', // FSM: 'MENU', 'PLAYING', 'END_SCREEN'
+    hubLevel: 1,
 };
 let uiButtons = {};
 let visualEffects = { sentryShots: [], sentryFlashes: [], enemyExplosions: [] };
@@ -474,10 +475,26 @@ canvas.addEventListener('click', function(e) {
                     let baseCost = node.program.type === 'miner' ? 20 : node.program.type === 'shield' ? 30 : 40;
                     let cost = baseCost * node.program.level;
                     let cpuCost = 5 * node.program.level;
-                    if (gameState.dp >= cost && gameState.cpu >= cpuCost) {
+                    if (gameState.dp >= cost && gameState.cpu >= cpuCost && node.program.level < gameState.hubLevel) {
                         gameState.dp -= cost;
                         gameState.cpu -= cpuCost;
                         node.program.level++;
+                        sound.play('upgrade');
+                        gameState.selectedNodeId = null;
+                        return;
+                    }
+                }
+            }
+            if (key === 'upgrade_hub' && gameState.selectedNodeId) {
+                const node = gameState.nodes[gameState.selectedNodeId];
+                if (node && node.type === 'hub') {
+                    // --- Стоимость апгрейда HUB: ручной UX-тест ---
+                    let cost = 30 * gameState.hubLevel; // Было: 50 * hubLevel. Для RL-анализа заменить формулу на RL-оптимальную.
+                    if (gameState.cpu >= cost) {
+                        gameState.cpu -= cost;
+                        gameState.hubLevel++;
+                        sound.play('upgrade');
+                        gameState.selectedNodeId = null;
                         return;
                     }
                 }
@@ -881,13 +898,24 @@ function calculateProgramUIButtons(selectedNode) {
     if (!selectedNode) return {};
     const buttons = {};
     let offsetX = 40, offsetY = 0;
-    const btnW = 180, btnH = 38, btnW2 = 150, btnH2 = 36, spacing = 12;
+    const btnW = 210, btnH = 38, btnW2 = 180, btnH2 = 36, spacing = 12; // увеличил ширину
     if(selectedNode.x + offsetX + btnW > canvas.width) offsetX = - (btnW + 40);
+
+    // --- HUB: только апгрейд ---
+    if (selectedNode.type === 'hub') {
+        const x = selectedNode.x + offsetX;
+        const y = selectedNode.y - btnH/2 + offsetY;
+        buttons['upgrade_hub'] = { x, y, w: btnW, h: btnH, type: 'upgrade_hub' };
+        return buttons;
+    }
 
     if (selectedNode.program) {
         const x = selectedNode.x + offsetX;
         const y = selectedNode.y - btnH/2 + offsetY;
-        buttons['upgrade'] = { x, y, w: btnW, h: btnH, type: 'upgrade'};
+        // --- Ограничение: апгрейд только если hubLevel >= целевого уровня ---
+        if (selectedNode.program.level < gameState.hubLevel) {
+            buttons['upgrade'] = { x, y, w: btnW, h: btnH, type: 'upgrade'};
+        }
     } else {
         const buttonData = [];
         if (selectedNode.type === 'cpu_node') {
@@ -910,10 +938,8 @@ function calculateProgramUIButtons(selectedNode) {
 function drawProgramUI(ctx, selectedNode) {
     if (!selectedNode) return;
     ctx.save();
-    ctx.font = 'bold 16px sans-serif'; ctx.textBaseline = 'middle';
-
+    ctx.font = 'bold 15px sans-serif'; ctx.textBaseline = 'middle'; // уменьшил шрифт
     uiButtons = calculateProgramUIButtons(selectedNode); // Recalculate for drawing
-
     for (const key in uiButtons) {
         const btn = uiButtons[key];
         ctx.beginPath(); ctx.roundRect(btn.x, btn.y, btn.w, btn.h, 10);
@@ -921,19 +947,31 @@ function drawProgramUI(ctx, selectedNode) {
         ctx.shadowBlur = 8; ctx.fill(); ctx.shadowBlur = 0;
         ctx.lineWidth = 2; ctx.strokeStyle = '#00eaff'; ctx.stroke();
         ctx.fillStyle = '#fff';
-        
         let label = '';
         if (btn.type === 'upgrade') {
             let prog = selectedNode.program;
             let baseCost = prog.type === 'miner' ? 20 : prog.type === 'shield' ? 30 : 40;
             let cost = Math.round(baseCost * 1.5 * prog.level);
             let cpuCost = 10 * prog.level;
-            label = `Upgrade Lvl ${prog.level+1} (${cost}DP, ${cpuCost}CPU)`;
+            label = `Upgrade Lvl ${prog.level+1}\n(${cost}DP, ${cpuCost}CPU)`;
+        } else if (btn.type === 'upgrade_hub') {
+            // --- Отображение стоимости апгрейда HUB ---
+            let cost = 30 * gameState.hubLevel; // Было: 50 * hubLevel. Для RL-анализа заменить формулу на RL-оптимальную.
+            label = `Upgrade HUB\n(${cost} CPU)`;
         } else {
-            label = `${btn.label} (${btn.cost} DP)`;
+            let btnLabel = btn.label || '';
+            let btnCost = btn.cost !== undefined ? btn.cost : '?';
+            label = `${btnLabel} (${btnCost} DP)`;
         }
         ctx.textAlign = 'center';
-        ctx.fillText(label, btn.x + btn.w/2, btn.y + btn.h/2);
+        // Перенос строки, если есть \n
+        if (label.includes('\n')) {
+            const [l1, l2] = label.split('\n');
+            ctx.fillText(l1, btn.x + btn.w/2, btn.y + btn.h/2 - 8);
+            ctx.fillText(l2, btn.x + btn.w/2, btn.y + btn.h/2 + 8);
+        } else {
+            ctx.fillText(label, btn.x + btn.w/2, btn.y + btn.h/2);
+        }
     }
     ctx.restore();
 }
