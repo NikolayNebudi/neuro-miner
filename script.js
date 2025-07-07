@@ -252,7 +252,7 @@ function generateStrictSpecialNetwork() {
     const dsu = new DSU(mstNodes.map(n => n.id));
     let mstEdges = [];
     for (const { a, b } of pairs) {
-        if (!dsu.connected(a.id, b.id)) {
+        if (!dsu.connected(a, b)) {
             a.addNeighbor(b.id);
             b.addNeighbor(a.id);
             mstEdges.push([a.id, b.id]);
@@ -312,109 +312,405 @@ function generateStrictSpecialNetwork() {
     return nodes;
 }
 
-function generateCorridorNetwork() {
-    const nodes = {};
-    // 1. Размещаем Firewall в центре
-    const centerX = canvas.width * 0.5;
-    const centerY = canvas.height * 0.4;
-    const firewall = new Node(centerX, centerY, 'firewall', 'firewall');
-    nodes[firewall.id] = firewall;
-    // 2. Размещаем три key_node по кругу вокруг firewall
-    const keyNodes = [];
-    const keyRadius = 140;
-    for (let i = 0; i < 3; i++) {
-        const angle = Math.PI * (1.5 + i * 2 / 3); // равномерно по кругу
-        const x = centerX + Math.cos(angle) * keyRadius;
-        const y = centerY + Math.sin(angle) * keyRadius;
-        const key = new Node(x, y, `key_node${i+1}`, 'key');
-        nodes[key.id] = key;
-        keyNodes.push(key);
-        // Прямая связь с firewall
-        key.addNeighbor(firewall.id);
-        firewall.addNeighbor(key.id);
-    }
-    // 3. Размещаем hub ниже firewall
-    const hub = new Node(centerX, centerY + 200, 'hub', 'hub');
-    nodes[hub.id] = hub;
-    // 4. Размещаем system выше firewall
-    const system = new Node(centerX, centerY - 170, 'system', 'system');
-    nodes[system.id] = system;
-    firewall.addNeighbor(system.id);
-    system.addNeighbor(firewall.id);
-    // 5. Для каждого key_node строим коридор к hub через 1-2 обычные ноды
-    let fillerCount = 0;
-    for (const key of keyNodes) {
-        const corridorLen = 1 + Math.floor(Math.random() * 2); // 1 или 2
-        let prev = hub;
-        for (let i = 0; i < corridorLen; i++) {
-            // Позиция между hub и key
-            const t = (i + 1) / (corridorLen + 1);
-            const x = hub.x * (1 - t) + key.x * t + (Math.random() - 0.5) * 20;
-            const y = hub.y * (1 - t) + key.y * t + (Math.random() - 0.5) * 20;
-            const filler = new Node(x, y, `corridor_${key.id}_${i}`, 'data');
-            nodes[filler.id] = filler;
-            prev.addNeighbor(filler.id);
-            filler.addNeighbor(prev.id);
-            prev = filler;
-            fillerCount++;
-        }
-        // Соединяем последний filler с key_node (но не трогаем связь key_node-firewall)
-        prev.addNeighbor(key.id);
-        key.addNeighbor(prev.id);
-    }
-    // 6. Добавляем остальные ноды и соединяем как обычно
-    const nodeCount = Math.floor(Math.random() * 11) + 15; // 15-25 обычных
-    for (let i = 0; i < nodeCount; i++) {
-        let pos;
-        let attempts = 0;
-        do {
-            pos = generateRandomPosition(nodes);
-            attempts++;
-        } while ((isNodeOverlapping(pos.x, pos.y, nodes, 60)) && attempts < 100);
-        const node = new Node(pos.x, pos.y, 'node' + i, 'data');
-        nodes[node.id] = node;
-    }
-    const nodeIds = Object.keys(nodes);
-    for (const id of nodeIds) {
-        if (["hub","key_node1","key_node2","key_node3","firewall","system"].includes(id)) continue;
-        if (id.startsWith('corridor_')) continue;
-        let dists = [];
-        for (const other of nodeIds) {
-            if (id === other) continue;
-            if (["key_node1","key_node2","key_node3","firewall","system"].includes(other)) continue;
-            dists.push({ id: other, dist: getDistance(nodes[id].x, nodes[id].y, nodes[other].x, nodes[other].y) });
-        }
-        dists.sort((a, b) => a.dist - b.dist);
-        let added = 0;
-        for (const { id: other } of dists) {
-            if (nodes[id].neighbors.includes(other)) continue;
-            nodes[id].addNeighbor(other);
-            nodes[other].addNeighbor(id);
-            added++;
-            if (added >= 2) break;
+function findAllConnectedNodes(startId, nodesObj) {
+    const visited = new Set();
+    const queue = [startId];
+    while (queue.length) {
+        const cur = queue.shift();
+        visited.add(cur);
+        for (const n of nodesObj[cur].neighbors) {
+            if (!visited.has(n)) queue.push(n);
         }
     }
-    // 7. Проверка связности (BFS от hub)
-    function isAllConnected() {
-        const visited = new Set();
-        const queue = ['hub'];
-        while (queue.length > 0) {
-            const cur = queue.shift();
-            visited.add(cur);
-            for (const n of nodes[cur].neighbors) {
-                if (!visited.has(n)) queue.push(n);
-            }
-        }
-        return Object.keys(nodes).every(id => visited.has(id));
-    }
-    if (!isAllConnected()) {
-        console.warn('Внимание: сеть не связная!');
-    }
-    fixNodeOverlaps(nodes, 60, 1000);
-    return nodes;
+    return visited;
 }
 
-game_state.nodes = generateCorridorNetwork();
+// --- Удаление мусорных веток и изолированных нод ---
+function pruneAndCleanNetwork(nodesObj, specialNodeIds) {
+    let changed = true;
+    // A. Обрезаем листья (не специальные)
+    while (changed) {
+        changed = false;
+        for (const [id, node] of Object.entries(nodesObj)) {
+            if (specialNodeIds.includes(id)) continue;
+            if (node.neighbors.length === 1) {
+                // Удаляем связь у соседа
+                const neighborId = node.neighbors[0];
+                nodesObj[neighborId].neighbors = nodesObj[neighborId].neighbors.filter(nid => nid !== id);
+                delete nodesObj[id];
+                changed = true;
+                break;
+            }
+        }
+    }
+    // B. Удаляем изолированные (не специальные)
+    for (const [id, node] of Object.entries(nodesObj)) {
+        if (specialNodeIds.includes(id)) continue;
+        if (node.neighbors.length === 0) {
+            delete nodesObj[id];
+        }
+    }
+    return nodesObj;
+}
+
+function generateLogicalGameNetwork() {
+    // 1. Unified Node Creation
+    const width = canvas.width, height = canvas.height;
+    const minDist = 60;
+    // Спец-ноды
+    const nodes = [];
+    nodes.push({id: 'hub', type: 'hub'});
+    nodes.push({id: 'firewall', type: 'firewall'});
+    nodes.push({id: 'system', type: 'system'});
+    nodes.push({id: 'key_node1', type: 'key'});
+    nodes.push({id: 'key_node2', type: 'key'});
+    nodes.push({id: 'key_node3', type: 'key'});
+    // Filler nodes
+    const fillerCount = Math.floor(Math.random() * 11) + 18; // 18-28
+    for (let i = 0; i < fillerCount; i++) {
+        nodes.push({id: 'node' + i, type: 'data'});
+    }
+    // Случайные стартовые позиции
+    for (const n of nodes) {
+        let attempts = 0;
+        do {
+            n.x = Math.random() * (width - 80) + 40;
+            n.y = Math.random() * (height - 80) + 40;
+            attempts++;
+        } while (nodes.some(other => other !== n && getDistance(n.x, n.y, other.x, other.y) < minDist) && attempts < 100);
+    }
+    // 2. Delaunay Triangulation
+    const delaunay = d3.Delaunay.from(nodes, d => d.x, d => d.y);
+    const delaunayEdges = new Set();
+    for (let e = 0; e < delaunay.halfedges.length; e++) {
+        const p = delaunay.triangles[e];
+        const q = delaunay.triangles[delaunay.halfedges[e]];
+        if (q === undefined || p === q) continue;
+        const a = nodes[p].id, b = nodes[q].id;
+        const edge = a < b ? `${a}|${b}` : `${b}|${a}`;
+        delaunayEdges.add(edge);
+    }
+    // 3. Minimum Spanning Tree (Kruskal)
+    const edgesArr = Array.from(delaunayEdges).map(e => {
+        const [a, b] = e.split('|');
+        const na = nodes.find(n => n.id === a);
+        const nb = nodes.find(n => n.id === b);
+        return {a, b, dist: getDistance(na.x, na.y, nb.x, nb.y)};
+    });
+    edgesArr.sort((e1, e2) => e1.dist - e2.dist);
+    class DSU { constructor(ids) { this.p = {}; ids.forEach(x => this.p[x] = x); } find(x) { return this.p[x] === x ? x : (this.p[x] = this.find(this.p[x])); } union(x, y) { this.p[this.find(x)] = this.find(y); } connected(x, y) { return this.find(x) === this.find(y); } }
+    const dsu = new DSU(nodes.map(n => n.id));
+    const mstEdges = [];
+    for (const {a, b} of edgesArr) {
+        if (!dsu.connected(a, b)) {
+            mstEdges.push([a, b]);
+            dsu.union(a, b);
+        }
+    }
+    // 4. Add Richness: часть оставшихся рёбер
+    const mstSet = new Set(mstEdges.map(([a, b]) => a < b ? `${a}|${b}` : `${b}|${a}`));
+    const extraEdges = Array.from(delaunayEdges).filter(e => !mstSet.has(e));
+    const extraCount = Math.floor(extraEdges.length * 0.2);
+    const shuffled = extraEdges.sort(() => Math.random() - 0.5);
+    const finalEdges = [...mstEdges];
+    for (let i = 0; i < extraCount; i++) {
+        const [a, b] = shuffled[i].split('|');
+        finalEdges.push([a, b]);
+    }
+    // 5. Enforce Game Rules
+    // a) system только с firewall
+    let systemEdges = finalEdges.filter(([a, b]) => a === 'system' || b === 'system');
+    finalEdges.push(['system', 'firewall']);
+    for (const [a, b] of systemEdges) {
+        if ((a === 'system' && b !== 'firewall') || (b === 'system' && a !== 'firewall')) {
+            // Удаляем лишние связи
+            const idx = finalEdges.findIndex(([x, y]) => (x === a && y === b) || (x === b && y === a));
+            if (idx !== -1) finalEdges.splice(idx, 1);
+        }
+    }
+    // b) все key_nodes соединены с firewall
+    for (const kid of ['key_node1','key_node2','key_node3']) {
+        if (!finalEdges.some(([a, b]) => (a === kid && b === 'firewall') || (b === kid && a === 'firewall'))) {
+            finalEdges.push([kid, 'firewall']);
+        }
+    }
+    // --- Формируем структуру для рендера ---
+    const nodesObj = {};
+    for (const n of nodes) {
+        nodesObj[n.id] = {...n, neighbors: []};
+    }
+    for (const [a, b] of finalEdges) {
+        nodesObj[a].neighbors.push(b);
+        nodesObj[b].neighbors.push(a);
+    }
+    // --- Исправление островков ---
+    while (true) {
+        const connected = findAllConnectedNodes('hub', nodesObj);
+        if (connected.size === Object.keys(nodesObj).length) break;
+        const all = new Set(Object.keys(nodesObj));
+        const islands = [...all].filter(id => !connected.has(id));
+        let minDist = Infinity, bridge = null;
+        for (const iso of islands) {
+            for (const main of connected) {
+                const d = getDistance(nodesObj[iso].x, nodesObj[iso].y, nodesObj[main].x, nodesObj[main].y);
+                if (d < minDist) {
+                    minDist = d;
+                    bridge = [iso, main];
+                }
+            }
+        }
+        if (bridge) {
+            nodesObj[bridge[0]].neighbors.push(bridge[1]);
+            nodesObj[bridge[1]].neighbors.push(bridge[0]);
+        } else {
+            break;
+        }
+    }
+    // --- Пиннинг только для hub, system, firewall ---
+    nodesObj['hub'].fx = width / 2;
+    nodesObj['hub'].fy = height - 50;
+    nodesObj['system'].fx = width / 2;
+    nodesObj['system'].fy = 50;
+    nodesObj['firewall'].fx = width / 2;
+    nodesObj['firewall'].fy = height / 2.7;
+    // --- Очистка связей firewall ---
+    const allowedNeighbors = ['system', 'key_node1', 'key_node2', 'key_node3'];
+    const fw = nodesObj['firewall'];
+    fw.neighbors = fw.neighbors.filter(nid => allowedNeighbors.includes(nid));
+    for (const nid of Object.keys(nodesObj)) {
+        if (nid === 'firewall') continue;
+        if (!allowedNeighbors.includes(nid)) {
+            nodesObj[nid].neighbors = nodesObj[nid].neighbors.filter(x => x !== 'firewall');
+        }
+    }
+    for (const n of allowedNeighbors) {
+        if (!fw.neighbors.includes(n)) {
+            fw.neighbors.push(n);
+        }
+        if (!nodesObj[n].neighbors.includes('firewall')) {
+            nodesObj[n].neighbors.push('firewall');
+        }
+    }
+    // --- Обрезка мусорных веток и чистка ---
+    const specialNodeIds = ['hub', 'system', 'firewall', 'key_node1', 'key_node2', 'key_node3'];
+    pruneAndCleanNetwork(nodesObj, specialNodeIds);
+    return nodesObj;
+}
+
+function angleBetweenEdges(ax, ay, bx, by, cx, cy) {
+    // угол между AB и AC
+    const v1x = bx - ax, v1y = by - ay;
+    const v2x = cx - ax, v2y = cy - ay;
+    const dot = v1x * v2x + v1y * v2y;
+    const len1 = Math.sqrt(v1x * v1x + v1y * v1y);
+    const len2 = Math.sqrt(v2x * v2x + v2y * v2y);
+    if (len1 === 0 || len2 === 0) return 180;
+    let angle = Math.acos(Math.max(-1, Math.min(1, dot / (len1 * len2))));
+    return angle * 180 / Math.PI;
+}
+
+function generateSimpleNetwork() {
+    // 1. Генерация нод
+    const width = canvas.width, height = canvas.height;
+    const nodes = [];
+    nodes.push({id: 'hub', type: 'hub', x: Math.random() * (width - 80) + 40, y: Math.random() * (height - 80) + 40, neighbors: []});
+    const count = Math.floor(Math.random() * 11) + 25; // 25-35
+    for (let i = 0; i < count; i++) {
+        let x, y, tries = 0;
+        do {
+            x = Math.random() * (width - 80) + 40;
+            y = Math.random() * (height - 80) + 40;
+            tries++;
+        } while (nodes.some(n => getDistance(n.x, n.y, x, y) < 40) && tries < 100);
+        nodes.push({id: 'node'+i, type: 'data', x, y, neighbors: []});
+    }
+    // 2. MST (Крускал)
+    const edges = [];
+    for (let i = 0; i < nodes.length; i++) {
+        for (let j = i+1; j < nodes.length; j++) {
+            edges.push({a: i, b: j, dist: getDistance(nodes[i].x, nodes[i].y, nodes[j].x, nodes[j].y)});
+        }
+    }
+    edges.sort((e1, e2) => e1.dist - e2.dist);
+    class DSU { constructor(n) { this.p = Array(n).fill(0).map((_,i)=>i); } find(x) { return this.p[x]===x?x:this.p[x]=this.find(this.p[x]); } union(x,y){this.p[this.find(x)]=this.find(y);} connected(x,y){return this.find(x)===this.find(y);} }
+    const dsu = new DSU(nodes.length);
+    const mstEdges = [];
+    for (const {a, b} of edges) {
+        if (!dsu.connected(a, b)) {
+            mstEdges.push([a, b]);
+            dsu.union(a, b);
+            nodes[a].neighbors.push(nodes[b].id);
+            nodes[b].neighbors.push(nodes[a].id);
+        }
+    }
+    // 3. Добавляем дополнительные рёбра (не более 3 связей, без пересечений, с ограничением углов)
+    function edgeCrosses(a1, b1, a2, b2) {
+        function ccw(ax, ay, bx, by, cx, cy) {
+            return (cy - ay) * (bx - ax) > (by - ay) * (cx - ax);
+        }
+        return (a1 !== a2 && a1 !== b2 && b1 !== a2 && b1 !== b2) &&
+            ccw(a1.x, a1.y, a2.x, a2.y, b2.x, b2.y) !== ccw(b1.x, b1.y, a2.x, a2.y, b2.x, b2.y) &&
+            ccw(a1.x, a1.y, b1.x, b1.y, a2.x, a2.y) !== ccw(a1.x, a1.y, b1.x, b1.y, b2.x, b2.y);
+    }
+    const allEdges = [...mstEdges];
+    for (const {a, b} of edges) {
+        if (nodes[a].neighbors.length >= 3 || nodes[b].neighbors.length >= 3) continue;
+        if (nodes[a].neighbors.includes(nodes[b].id)) continue;
+        // Проверка на пересечение
+        let crosses = false;
+        for (const [i1, j1] of allEdges) {
+            const n1 = nodes[i1], n2 = nodes[j1];
+            if (edgeCrosses(nodes[a], nodes[b], n1, n2)) {
+                crosses = true; break;
+            }
+        }
+        if (crosses) continue;
+        // Проверка углов для обеих нод
+        let angleTooSmall = false;
+        for (const n of [a, b]) {
+            const node = nodes[n];
+            for (const neighborId of node.neighbors) {
+                const neighbor = nodes.find(x => x.id === neighborId);
+                const angle = angleBetweenEdges(node.x, node.y, neighbor.x, neighbor.y, nodes[a === n ? b : a].x, nodes[a === n ? b : a].y);
+                if (angle < 25) { angleTooSmall = true; break; }
+            }
+            if (angleTooSmall) break;
+        }
+        if (angleTooSmall) continue;
+        nodes[a].neighbors.push(nodes[b].id);
+        nodes[b].neighbors.push(nodes[a].id);
+        allEdges.push([a, b]);
+    }
+    // --- Формируем nodesObj для визуализации ---
+    const nodesObj = {};
+    for (const n of nodes) nodesObj[n.id] = n;
+    return nodesObj;
+}
+
+// --- D3.js визуализация ---
+function renderD3Network(nodesObj) {
+    const svg = d3.select('#network');
+    svg.selectAll('*').remove();
+    const width = +svg.attr('width');
+    const height = +svg.attr('height');
+    const margin = 48;
+    // Преобразуем nodesObj в массивы nodes/links
+    const nodes = Object.values(nodesObj);
+    const links = [];
+    for (const node of nodes) {
+        for (const nId of node.neighbors) {
+            if (node.id < nId) links.push({ source: node.id, target: nId });
+        }
+    }
+    // D3 force simulation с группирующими силами для key_nodes и forceCollide
+    const simulation = d3.forceSimulation(nodes)
+        .force('link', d3.forceLink(links)
+            .id(d => d.id)
+            .distance(d => 140 + 20 * (Math.max(d.source.neighbors.length, d.target.neighbors.length) - 1))
+            .strength(0.9))
+        .force('charge', d3.forceManyBody().strength(-120))
+        .force('center', d3.forceCenter(width / 2, height / 2).strength(0.01))
+        .force('forceX', d3.forceX(d => {
+            if (d.id === 'key_node1') return width * 0.25;
+            if (d.id === 'key_node2') return width * 0.75;
+            return width / 2;
+        }).strength(d => (d.type === 'key' ? 0.05 : 0.01)))
+        .force('forceY', d3.forceY(d => {
+            if (d.id === 'key_node1' || d.id === 'key_node2') return height * 0.3;
+            if (d.id === 'key_node3') return height * 0.6;
+            return height / 2;
+        }).strength(d => (d.type === 'key' ? 0.05 : 0.01)))
+        .force('collide', d3.forceCollide().radius(d => {
+            if (d.type === 'hub') return 36 + 8;
+            if (d.type === 'system') return 32 + 8;
+            if (d.type === 'firewall') return 24 + 8;
+            if (d.type === 'key') return 24 + 8;
+            return 24 + 8;
+        }).strength(1));
+    // Рёбра
+    const link = svg.append('g')
+        .attr('stroke', '#00eaff')
+        .attr('stroke-opacity', 0.7)
+        .selectAll('line')
+        .data(links)
+        .join('line')
+        .attr('stroke-width', 2);
+    // Узлы
+    const node = svg.append('g')
+        .selectAll('circle')
+        .data(nodes)
+        .join('circle')
+        .attr('r', d => d.type === 'hub' ? 36 : d.type === 'system' ? 32 : 24)
+        .attr('fill', d => {
+            if (d.type === 'hub') return '#ff9100';
+            if (d.type === 'system') return '#00ff90';
+            if (d.type === 'firewall') return '#ff1744';
+            if (d.type === 'key') return '#ffe066';
+            return '#00eaff';
+        })
+        .attr('stroke', d => {
+            if (d.type === 'key') return '#ffe066';
+            if (d.type === 'hub') return '#ff9100';
+            if (d.type === 'system') return '#00ff90';
+            if (d.type === 'firewall') return '#ff1744';
+            return '#fff';
+        })
+        .attr('stroke-width', 3)
+        .call(drag(simulation));
+    // Текстовые подписи
+    const labels = svg.append('g')
+        .selectAll('text')
+        .data(nodes)
+        .join('text')
+        .attr('text-anchor', 'middle')
+        .attr('dy', '.35em')
+        .attr('font-family', 'sans-serif')
+        .attr('font-weight', 'bold')
+        .attr('font-size', d => d.type === 'hub' || d.type === 'system' ? 18 : 13)
+        .attr('fill', d => d.type === 'system' || d.type === 'hub' ? '#fff' : '#222')
+        .text(d => {
+            if (d.type === 'hub') return 'HUB';
+            if (d.type === 'system') return 'SYS';
+            return '';
+        });
+    simulation.on('tick', () => {
+        link
+            .attr('x1', d => Math.max(margin, Math.min(width - margin, d.source.x)))
+            .attr('y1', d => Math.max(margin, Math.min(height - margin, d.source.y)))
+            .attr('x2', d => Math.max(margin, Math.min(width - margin, d.target.x)))
+            .attr('y2', d => Math.max(margin, Math.min(height - margin, d.target.y)));
+        node
+            .attr('cx', d => d.x = Math.max(margin, Math.min(width - margin, d.x)))
+            .attr('cy', d => d.y = Math.max(margin, Math.min(height - margin, d.y)));
+        labels
+            .attr('x', d => d.x)
+            .attr('y', d => d.y);
+    });
+    function drag(simulation) {
+        function dragstarted(event, d) {
+            if (!event.active) simulation.alphaTarget(0.3).restart();
+            d.fx = d.x;
+            d.fy = d.y;
+        }
+        function dragged(event, d) {
+            d.fx = Math.max(margin, Math.min(width - margin, event.x));
+            d.fy = Math.max(margin, Math.min(height - margin, event.y));
+        }
+        function dragended(event, d) {
+            if (!event.active) simulation.alphaTarget(0);
+            d.fx = null;
+            d.fy = null;
+        }
+        return d3.drag()
+            .on('start', dragstarted)
+            .on('drag', dragged)
+            .on('end', dragended);
+    }
+}
+
+// --- Используем новый генератор ---
+game_state.nodes = generateSimpleNetwork();
+renderD3Network(game_state.nodes);
 
 // --- Пульсация ---
 let pulseTime = 0;
@@ -766,4 +1062,75 @@ function fixNodeOverlaps(nodes, minDist = 60, maxTries = 1000) {
     }
 }
 
-// После генерации сети вызываем fixNodeOverlaps(nodes)
+function fixEdgeIntersectionsStrict(nodes) {
+    let changed = true;
+    let maxTries = 1000;
+    // system-firewall и key-firewall не трогаем
+    function isProtectedEdge(a, b) {
+        const protectedPairs = [
+            ['system', 'firewall'],
+            ['firewall', 'system'],
+            ['key_node1', 'firewall'], ['firewall', 'key_node1'],
+            ['key_node2', 'firewall'], ['firewall', 'key_node2'],
+            ['key_node3', 'firewall'], ['firewall', 'key_node3'],
+        ];
+        return protectedPairs.some(([x, y]) => (a === x && b === y));
+    }
+    while (changed && maxTries-- > 0) {
+        changed = false;
+        let allEdges = [];
+        for (const id in nodes) {
+            for (const nId of nodes[id].neighbors) {
+                if (id < nId) allEdges.push([id, nId]);
+            }
+        }
+        outer: for (let i = 0; i < allEdges.length; i++) {
+            for (let j = i + 1; j < allEdges.length; j++) {
+                const [a1, b1] = allEdges[i];
+                const [a2, b2] = allEdges[j];
+                if ([a1, b1].some(x => x === a2 || x === b2)) continue;
+                if (doLinesIntersect(
+                    nodes[a1].x, nodes[a1].y, nodes[b1].x, nodes[b1].y,
+                    nodes[a2].x, nodes[a2].y, nodes[b2].x, nodes[b2].y
+                )) {
+                    // Не трогаем защищённые связи
+                    let canBreak1 = !isProtectedEdge(a1, b1) && !isProtectedEdge(b1, a1);
+                    let canBreak2 = !isProtectedEdge(a2, b2) && !isProtectedEdge(b2, a2);
+                    if (!canBreak1 && !canBreak2) continue;
+                    // Разрываем одну из разрешённых связей
+                    let [from, to] = (canBreak1 && canBreak2) ? (Math.random() < 0.5 ? [a1, b1] : [a2, b2]) : (canBreak1 ? [a1, b1] : [a2, b2]);
+                    nodes[from].neighbors = nodes[from].neighbors.filter(n => n !== to);
+                    nodes[to].neighbors = nodes[to].neighbors.filter(n => n !== from);
+                    // Пробуем переподключить from к другому соседу
+                    let nodeIds = Object.keys(nodes);
+                    let candidates = nodeIds.filter(nid =>
+                        nid !== from &&
+                        !nodes[from].neighbors.includes(nid) &&
+                        !isProtectedEdge(from, nid) &&
+                        !isProtectedEdge(nid, from)
+                    );
+                    // Оставляем только тех, кто не создаёт пересечений
+                    candidates = candidates.filter(nid => {
+                        for (const [x, y] of allEdges) {
+                            if ((x === from && y === to) || (x === to && y === from)) continue;
+                            if (doLinesIntersect(
+                                nodes[from].x, nodes[from].y, nodes[nid].x, nodes[nid].y,
+                                nodes[x].x, nodes[x].y, nodes[y].x, nodes[y].y
+                            )) return false;
+                        }
+                        return true;
+                    });
+                    if (candidates.length > 0) {
+                        let newTo = candidates[Math.floor(Math.random() * candidates.length)];
+                        nodes[from].addNeighbor(newTo);
+                        nodes[newTo].addNeighbor(from);
+                    }
+                    changed = true;
+                    break outer;
+                }
+            }
+        }
+    }
+}
+
+// После генерации сети вызываем fixEdgeIntersectionsStrict(nodes)
