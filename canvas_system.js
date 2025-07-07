@@ -247,50 +247,181 @@ function fixEdgeIntersectionsAndReconnect(nodesObj) {
     }
 }
 
+function attachTailsToNetwork(nodesObj) {
+    const nodes = Object.values(nodesObj);
+    let changed = true;
+    let maxTries = 100;
+    function doLinesIntersect(x1, y1, x2, y2, x3, y3, x4, y4) {
+        function ccw(ax, ay, bx, by, cx, cy) {
+            return (cy - ay) * (bx - ax) > (by - ay) * (cx - ax);
+        }
+        return ccw(x1, y1, x3, y3, x4, y4) !== ccw(x2, y2, x3, y3, x4, y4) &&
+               ccw(x1, y1, x2, y2, x3, y3) !== ccw(x1, y1, x2, y2, x4, y4);
+    }
+    while (changed && maxTries-- > 0) {
+        changed = false;
+        // 1. Находим все листья (ноды с одной связью)
+        const leaves = nodes.filter(n => n.neighbors.length === 1);
+        if (leaves.length === 0) break;
+        for (const leaf of leaves) {
+            // 2. Ищем ближайшую подходящую ноду (не сосед, не сам, <3 связей)
+            let minDist = Infinity, best = null;
+            for (const n of nodes) {
+                if (n.id === leaf.id) continue;
+                if (leaf.neighbors.includes(n.id)) continue;
+                if (n.neighbors.length >= 3 || leaf.neighbors.length >= 3) continue;
+                // Проверка на пересечение
+                let ok = true;
+                for (const n1 of nodes) {
+                    for (const n2id of n1.neighbors) {
+                        if (n1.id < n2id) {
+                            const n2 = nodesObj[n2id];
+                            if ([n.id, leaf.id].some(x => x === n1.id || x === n2.id)) continue;
+                            if (doLinesIntersect(leaf.x, leaf.y, n.x, n.y, n1.x, n1.y, n2.x, n2.y)) {
+                                ok = false; break;
+                            }
+                        }
+                    }
+                    if (!ok) break;
+                }
+                if (!ok) continue;
+                const d = getDistance(leaf.x, leaf.y, n.x, n.y);
+                if (d < minDist) {
+                    minDist = d;
+                    best = n;
+                }
+            }
+            if (best) {
+                leaf.neighbors.push(best.id);
+                best.neighbors.push(leaf.id);
+                changed = true;
+            }
+        }
+        if (!changed) break;
+    }
+}
+
 // --- Визуализация и анимация на canvas ---
 let game_state = { nodes: {} };
-function drawConnection(ctx, n1, n2, time) {
+let hoveredNodeId = null;
+let pathAnim = { path: null, startTime: 0, hovered: null };
+
+canvas.addEventListener('mousemove', function(e) {
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    hoveredNodeId = null;
+    for (const id in game_state.nodes) {
+        const node = game_state.nodes[id];
+        let base = node.type === 'hub' ? 36 : 18;
+        let amp = node.type === 'hub' ? 6 : 1.5;
+        let freq = node.type === 'hub' ? 1.5 : 0.7;
+        let phase = node.randomPhase || 0;
+        let time = performance.now() / 1000;
+        let size = base + Math.sin(time * freq + phase) * amp;
+        if ((mx - node.x) ** 2 + (my - node.y) ** 2 < size * size) {
+            hoveredNodeId = id;
+            break;
+        }
+    }
+    // Сброс анимации пути, если наведённая нода изменилась
+    if (hoveredNodeId !== pathAnim.hovered) {
+        pathAnim.hovered = hoveredNodeId;
+        pathAnim.startTime = performance.now();
+        pathAnim.path = null;
+    }
+});
+
+function findPathBFS(nodesObj, startId, endId) {
+    if (!startId || !endId) return null;
+    const queue = [[startId]];
+    const visited = new Set([startId]);
+    while (queue.length) {
+        const path = queue.shift();
+        const last = path[path.length - 1];
+        if (last === endId) return path;
+        for (const neighbor of nodesObj[last].neighbors) {
+            if (!visited.has(neighbor)) {
+                visited.add(neighbor);
+                queue.push([...path, neighbor]);
+            }
+        }
+    }
+    return null;
+}
+
+function drawConnection(ctx, n1, n2, time, highlight = false) {
     // Неоновая голубая пульсация с "бегущей волной"
     const pulse = 0.5 + 0.5 * Math.sin(time / 250 + (n1.x + n2.x + n1.y + n2.y) / 200);
     ctx.save();
     ctx.beginPath();
     ctx.moveTo(n1.x, n1.y);
     ctx.lineTo(n2.x, n2.y);
-    ctx.strokeStyle = `rgba(0,234,255,${0.45 + 0.3 * pulse})`;
-    ctx.shadowColor = '#00eaff';
-    ctx.shadowBlur = 6 + 6 * pulse;
-    ctx.lineWidth = 3.5 + 1.2 * pulse;
+    if (highlight) {
+        ctx.strokeStyle = `rgba(255,23,68,${0.65 + 0.3 * pulse})`;
+        ctx.shadowColor = '#ff1744';
+        ctx.shadowBlur = 18 + 10 * pulse;
+        ctx.lineWidth = 5 + 2 * pulse;
+    } else {
+        ctx.strokeStyle = `rgba(0,234,255,${0.45 + 0.3 * pulse})`;
+        ctx.shadowColor = '#00eaff';
+        ctx.shadowBlur = 6 + 6 * pulse;
+        ctx.lineWidth = 3.5 + 1.2 * pulse;
+    }
     ctx.stroke();
     // Внутренняя "нить"
     ctx.shadowBlur = 0;
-    ctx.lineWidth = 1.5;
-    ctx.strokeStyle = '#fff';
-    ctx.globalAlpha = 0.7 + 0.3 * pulse;
+    ctx.lineWidth = highlight ? 2.5 : 1.5;
+    ctx.strokeStyle = highlight ? '#fff0fa' : '#fff';
+    ctx.globalAlpha = highlight ? 1 : (0.7 + 0.3 * pulse);
     ctx.stroke();
     ctx.restore();
 }
 
-function drawNode(ctx, node, selected = false) {
+function drawNode(ctx, node, selected = false, highlight = false) {
     ctx.save();
     // Пульсация размера
-    let base = node.type === 'hub' ? 36 : 24;
-    let amp = node.type === 'hub' ? 6 : 2.5;
+    let base = node.type === 'hub' ? 36 : 18;
+    let amp = node.type === 'hub' ? 6 : 1.5;
     let freq = node.type === 'hub' ? 1.5 : 0.7;
     let phase = node.randomPhase || 0;
     let time = performance.now() / 1000;
+    if (highlight) { amp *= 1.7; base += 2; }
     let size = base + Math.sin(time * freq + phase) * amp;
     ctx.beginPath();
     ctx.arc(node.x, node.y, size, 0, 2 * Math.PI);
-    // Свечение
-    ctx.shadowColor = node.type === 'hub' ? '#ffb347' : '#66f6ff';
-    ctx.shadowBlur = node.type === 'hub' ? 24 : 18;
-    ctx.fillStyle = node.type === 'hub' ? '#ff9100' : '#00eaff';
-    ctx.globalAlpha = 1;
-    ctx.fill();
-    ctx.shadowBlur = 0;
-    ctx.lineWidth = 3;
-    ctx.strokeStyle = node.type === 'hub' ? '#ff9100' : '#fff';
-    ctx.stroke();
+    // Свечение и цвет
+    if (highlight) {
+        ctx.shadowColor = '#ff1744';
+        ctx.shadowBlur = 32;
+        ctx.fillStyle = node.type === 'hub' ? '#ff9100' : '#ff1744';
+        ctx.globalAlpha = 1;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = '#ff1744';
+        ctx.stroke();
+    } else if (hoveredNodeId === node.id) {
+        ctx.shadowColor = '#ff1744';
+        ctx.shadowBlur = 28;
+        ctx.fillStyle = node.type === 'hub' ? '#ff9100' : '#00eaff';
+        ctx.globalAlpha = 1;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = '#ff1744';
+        ctx.stroke();
+    } else {
+        ctx.shadowColor = node.type === 'hub' ? '#ffb347' : '#66f6ff';
+        ctx.shadowBlur = node.type === 'hub' ? 24 : 18;
+        ctx.fillStyle = node.type === 'hub' ? '#ff9100' : '#00eaff';
+        ctx.globalAlpha = 1;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = node.type === 'hub' ? '#ff9100' : '#fff';
+        ctx.stroke();
+    }
     // Текст для HUB
     if (node.type === 'hub') {
         ctx.font = 'bold 18px sans-serif';
@@ -305,18 +436,42 @@ function drawNode(ctx, node, selected = false) {
 function render() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     const time = Date.now();
+    // Поиск пути от HUB до hoveredNodeId
+    let path = null;
+    if (hoveredNodeId && hoveredNodeId !== 'hub') {
+        if (!pathAnim.path || pathAnim.hovered !== hoveredNodeId) {
+            pathAnim.path = findPathBFS(game_state.nodes, 'hub', hoveredNodeId);
+        }
+        path = pathAnim.path;
+    }
+    // Анимация проявления пути
+    let pathStep = 0;
+    if (path && path.length > 1) {
+        const stepMs = 90;
+        pathStep = Math.min(path.length, Math.floor((performance.now() - pathAnim.startTime) / stepMs) + 1);
+    }
     // Соединения
     for (const id in game_state.nodes) {
         const node = game_state.nodes[id];
         for (const nId of node.neighbors) {
             if (id < nId) {
-                drawConnection(ctx, node, game_state.nodes[nId], time);
+                let highlight = false;
+                if (path && pathStep > 1) {
+                    for (let i = 0; i < pathStep - 1; i++) {
+                        if ((path[i] === id && path[i+1] === nId) || (path[i] === nId && path[i+1] === id)) {
+                            highlight = true; break;
+                        }
+                    }
+                }
+                drawConnection(ctx, node, game_state.nodes[nId], time, highlight);
             }
         }
     }
     // Ноды
     for (const id in game_state.nodes) {
-        drawNode(ctx, game_state.nodes[id]);
+        let highlight = false;
+        if (path && pathStep > 0 && path.slice(0, pathStep).includes(id)) highlight = true;
+        drawNode(ctx, game_state.nodes[id], false, highlight);
     }
 }
 
@@ -328,4 +483,5 @@ function mainLoop() {
 game_state.nodes = generateCanvasNetwork();
 runForceSimulation(game_state.nodes, 250);
 fixEdgeIntersectionsAndReconnect(game_state.nodes);
+attachTailsToNetwork(game_state.nodes);
 mainLoop(); 
