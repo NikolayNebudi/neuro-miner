@@ -806,6 +806,37 @@ function drawNode(ctx, node) {
             }
         }
     }
+    if (node.type === 'cpu_node' && node.owner === 'player') {
+        // CPU-нода под контролем игрока
+        let lvl = node.program?.level || 1;
+        const cpuColors = ['#b388ff', '#d1aaff', '#f3e6ff'];
+        fill = cpuColors[Math.min(lvl-1, cpuColors.length-1)];
+        shadow = fill;
+        stroke = '#fffbe7';
+        // Яркое пульсирующее фиолетовое кольцо
+        for (let i = 0; i < lvl; i++) {
+            ctx.save();
+            ctx.globalAlpha = 0.22 + 0.09*i;
+            ctx.beginPath();
+            ctx.arc(node.x, node.y, size + 16 + 7*i + 4*Math.sin(time*2 + i), 0, 2 * Math.PI);
+            ctx.strokeStyle = cpuColors[Math.min(i, cpuColors.length-1)];
+            ctx.lineWidth = 5 + 2*i;
+            ctx.shadowColor = cpuColors[Math.min(i, cpuColors.length-1)];
+            ctx.shadowBlur = 22 + 10*i;
+            ctx.stroke();
+            ctx.restore();
+        }
+        // Пульсация внутреннего свечения
+        ctx.save();
+        ctx.globalAlpha = 0.13 + 0.09 * Math.abs(Math.sin(time*2));
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, size - 4, 0, 2 * Math.PI);
+        ctx.fillStyle = '#b388ff';
+        ctx.shadowColor = '#b388ff';
+        ctx.shadowBlur = 18 + 8*lvl;
+        ctx.fill();
+        ctx.restore();
+    }
     if (isSelected) { shadow = '#ff1744'; stroke = '#ff1744'; }
 
     ctx.beginPath();
