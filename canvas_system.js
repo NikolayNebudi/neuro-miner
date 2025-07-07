@@ -26,13 +26,14 @@ class Node {
 
 // --- Enemy Class ---
 class Enemy {
-    constructor(id, currentNodeId, path) {
+    constructor(id, currentNodeId, path, type = 'patrol') {
         this.id = id;
         this.currentNodeId = currentNodeId;
         this.path = path; // массив id
         this.pathStep = 0;
         this.decapturing = false;
-        this.health = 50; // новое свойство
+        this.health = type === 'hunter' ? 90 : 50; // больше здоровья у hunter
+        this.type = type;
     }
 }
 
@@ -142,6 +143,23 @@ function generateCanvasNetwork() {
     // --- Формируем nodesObj для визуализации ---
     const nodesObj = {};
     for (const n of nodes) nodesObj[n.id] = n;
+    // --- Спец.ноды ---
+    // cpu_node
+    let candidates = nodes.filter(n => n.type === 'data');
+    for (let i = 0; i < Math.floor(Math.random()*2)+1; i++) {
+        if (candidates.length === 0) break;
+        let idx = Math.floor(Math.random()*candidates.length);
+        candidates[idx].type = 'cpu_node';
+        candidates.splice(idx,1);
+    }
+    // data_cache
+    candidates = nodes.filter(n => n.type === 'data');
+    for (let i = 0; i < Math.floor(Math.random()*2)+1; i++) {
+        if (candidates.length === 0) break;
+        let idx = Math.floor(Math.random()*candidates.length);
+        candidates[idx].type = 'data_cache';
+        candidates.splice(idx,1);
+    }
     return nodesObj;
 }
 
@@ -339,6 +357,7 @@ let uiButtons = {};
 let sentryShots = [];
 let sentryFlashes = [];
 let enemyExplosions = [];
+let gameOver = false;
 
 canvas.addEventListener('mousemove', function(e) {
     const rect = canvas.getBoundingClientRect();
@@ -379,12 +398,31 @@ canvas.addEventListener('click', function(e) {
                 mx >= btn.x && mx <= btn.x + btn.w &&
                 my >= btn.y && my <= btn.y + btn.h
             ) {
-                // Проверяем DP и устанавливаем программу
+                let node = game_state.nodes[game_state.selectedNodeId];
+                // --- Upgrade ---
+                if (btn.type === 'upgrade') {
+                    let prog = node.program;
+                    let baseCost = prog.type === 'miner' ? 20 : prog.type === 'shield' ? 30 : 40;
+                    let cost = baseCost * prog.level;
+                    if (game_state.dp >= cost) {
+                        game_state.dp -= cost;
+                        prog.level++;
+                        if (prog.type === 'shield') {
+                            node.maxShieldHealth = 100 * prog.level;
+                            node.shieldHealth = node.maxShieldHealth;
+                        }
+                        game_state.selectedNodeId = null;
+                    } else {
+                        console.log('Недостаточно DP для апгрейда', prog.type);
+                    }
+                    return;
+                }
+                // --- Установка программ ---
                 let cost = 0;
                 if (btn.type === 'miner') cost = 20;
                 if (btn.type === 'shield') cost = 30;
                 if (btn.type === 'sentry') cost = 40;
-                let node = game_state.nodes[game_state.selectedNodeId];
+                if (btn.type === 'overclocker') cost = 50;
                 if (node.program) {
                     console.log('На этой ноде уже установлена программа!');
                     return;
@@ -392,13 +430,15 @@ canvas.addEventListener('click', function(e) {
                 if (game_state.dp >= cost) {
                     game_state.dp -= cost;
                     node.program = { type: btn.type, level: 1 };
-                    if (btn.type === 'shield') node.shieldHealth = node.maxShieldHealth; // выставляем щит
+                    if (btn.type === 'shield') {
+                        node.maxShieldHealth = 100;
+                        node.shieldHealth = node.maxShieldHealth;
+                    }
                     game_state.selectedNodeId = null;
                 } else {
-                    // Можно добавить всплывающее сообщение о нехватке DP
                     console.log('Недостаточно DP для установки', btn.type);
                 }
-                return; // Не обрабатываем дальше
+                return;
             }
         }
     }
@@ -492,12 +532,17 @@ function drawConnection(ctx, n1, n2, time, highlight = false) {
     ctx.restore();
 }
 
-function drawEnemy(ctx, node) {
+function drawEnemy(ctx, node, type = 'patrol') {
     ctx.save();
     ctx.beginPath();
     ctx.arc(node.x, node.y, 13, 0, 2 * Math.PI);
-    ctx.fillStyle = '#ff1744';
-    ctx.shadowColor = '#ff1744';
+    if (type === 'hunter') {
+        ctx.fillStyle = '#b388ff'; // фиолетовый
+        ctx.shadowColor = '#b388ff';
+    } else {
+        ctx.fillStyle = '#ff1744';
+        ctx.shadowColor = '#ff1744';
+    }
     ctx.shadowBlur = 16;
     ctx.globalAlpha = 0.85;
     ctx.fill();
@@ -507,7 +552,7 @@ function drawEnemy(ctx, node) {
     ctx.fillStyle = '#fff';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('E', node.x, node.y+1);
+    ctx.fillText(type === 'hunter' ? 'H' : 'E', node.x, node.y+1);
     ctx.restore();
 }
 
@@ -517,12 +562,17 @@ function drawProgramIcon(ctx, node) {
     ctx.font = 'bold 13px sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillStyle = node.owner === 'player' ? '#fff' : '#222';
-    let icon = '?';
-    if (node.program.type === 'miner') icon = 'M';
-    if (node.program.type === 'shield') icon = 'S';
-    if (node.program.type === 'sentry') icon = 'T';
+    // Цвет иконки по типу
+    let icon = '?', color = '#fff';
+    if (node.program.type === 'miner') { icon = 'M'; color = '#ffd600'; }
+    if (node.program.type === 'shield') { icon = 'S'; color = '#00eaff'; }
+    if (node.program.type === 'sentry') { icon = 'T'; color = '#00ff90'; }
+    ctx.fillStyle = color;
     ctx.fillText(icon, node.x, node.y + 18);
+    // Индикатор уровня
+    ctx.font = 'bold 12px sans-serif';
+    ctx.fillStyle = '#ffd600';
+    ctx.fillText(node.program.level, node.x + 13, node.y + 13);
     ctx.restore();
 }
 
@@ -552,9 +602,13 @@ function drawNode(ctx, node, selected = false, highlight = false) {
     let size = base + Math.sin(time * freq + phase) * amp;
     ctx.beginPath();
     ctx.arc(node.x, node.y, size, 0, 2 * Math.PI);
-    // Цвет и свечение по owner
+    // Цвет и свечение по owner и типу
     let fill, shadow, stroke;
-    if (node.owner === 'player') {
+    if (node.type === 'cpu_node') {
+        fill = '#b388ff'; shadow = '#e1bfff'; stroke = '#b388ff';
+    } else if (node.type === 'data_cache') {
+        fill = '#fff'; shadow = '#00eaff'; stroke = '#00eaff';
+    } else if (node.owner === 'player') {
         fill = '#ff9100'; shadow = '#ffb347'; stroke = '#ff9100';
     } else if (node.owner === 'enemy') {
         fill = '#ff1744'; shadow = '#ff668a'; stroke = '#ff1744';
@@ -573,6 +627,21 @@ function drawNode(ctx, node, selected = false, highlight = false) {
     ctx.lineWidth = highlight ? 4 : 3;
     ctx.strokeStyle = stroke;
     ctx.stroke();
+    // Подпись для спец.ноды
+    if (node.type === 'cpu_node') {
+        ctx.font = 'bold 13px sans-serif';
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('CPU', node.x, node.y);
+    }
+    if (node.type === 'data_cache') {
+        ctx.font = 'bold 13px sans-serif';
+        ctx.fillStyle = '#00eaff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('DATA', node.x, node.y);
+    }
     // Прогресс-бар захвата
     if (node.isCapturing) {
         ctx.save();
@@ -596,15 +665,46 @@ function drawNode(ctx, node, selected = false, highlight = false) {
         ctx.restore();
     }
     // Прогресс-бар щита
-    if (node.program && node.program.type === 'shield' && node.shieldHealth > 0) {
+    if (node.owner === 'player' && node.program && node.program.type === 'shield' && node.shieldHealth > 0) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.lineWidth = 6.5;
+        ctx.strokeStyle = '#00eaff';
+        ctx.globalAlpha = 0.92;
+        let shieldFrac = node.shieldHealth / node.maxShieldHealth;
+        ctx.setLineDash([8, 7]);
+        ctx.lineDashOffset = -performance.now()/18;
+        ctx.arc(node.x, node.y, size + 16, -Math.PI/2, -Math.PI/2 + 2 * Math.PI * shieldFrac);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+    }
+    // Прогресс-бар Sentry (зелёный, если установлен)
+    if (node.owner === 'player' && node.program && node.program.type === 'sentry') {
         ctx.save();
         ctx.beginPath();
         ctx.lineWidth = 5.5;
-        ctx.strokeStyle = '#00eaff';
-        ctx.globalAlpha = 0.85;
-        let shieldFrac = node.shieldHealth / node.maxShieldHealth;
-        ctx.arc(node.x, node.y, size + 16, -Math.PI/2, -Math.PI/2 + 2 * Math.PI * shieldFrac);
+        ctx.strokeStyle = '#00ff90';
+        ctx.globalAlpha = 0.7;
+        ctx.setLineDash([3, 7]);
+        ctx.lineDashOffset = -performance.now()/10;
+        ctx.arc(node.x, node.y, size + 12, 0, 2 * Math.PI);
         ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+    }
+    // Прогресс-бар Miner (жёлтый, пульсирующий)
+    if (node.owner === 'player' && node.program && node.program.type === 'miner') {
+        ctx.save();
+        ctx.beginPath();
+        ctx.lineWidth = 4.5;
+        ctx.strokeStyle = '#ffd600';
+        ctx.globalAlpha = 0.55 + 0.25 * Math.sin(performance.now()/300 + node.x);
+        ctx.setLineDash([2, 10]);
+        ctx.lineDashOffset = -performance.now()/12;
+        ctx.arc(node.x, node.y, size + 8, 0, 2 * Math.PI);
+        ctx.stroke();
+        ctx.setLineDash([]);
         ctx.restore();
     }
     // Текст для HUB
@@ -636,25 +736,19 @@ function getRandomPath(nodesObj, startId, length = 5) {
 
 function drawProgramUI(ctx, selectedNode) {
     if (!selectedNode) return;
-    // Параметры кнопок
-    const buttonData = [
-        { label: 'Miner', cost: 20, type: 'miner' },
-        { label: 'Shield', cost: 30, type: 'shield' },
-        { label: 'Sentry', cost: 40, type: 'sentry' },
-    ];
-    const btnW = 120, btnH = 36, spacing = 12;
-    const startX = selectedNode.x + 40;
-    const startY = selectedNode.y - ((btnH + spacing) * buttonData.length - spacing) / 2;
-    uiButtons = {};
     ctx.save();
     ctx.font = 'bold 16px sans-serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    for (let i = 0; i < buttonData.length; i++) {
-        const btn = buttonData[i];
-        const x = startX;
-        const y = startY + i * (btnH + spacing);
-        // Кнопка
+    uiButtons = {};
+    if (selectedNode.program) {
+        // Кнопка Upgrade
+        let prog = selectedNode.program;
+        let baseCost = prog.type === 'miner' ? 20 : prog.type === 'shield' ? 30 : 40;
+        let cost = baseCost * prog.level;
+        const btnW = 140, btnH = 38;
+        const x = selectedNode.x + 40;
+        const y = selectedNode.y - btnH/2;
         ctx.beginPath();
         ctx.roundRect(x, y, btnW, btnH, 10);
         ctx.fillStyle = '#232b33ee';
@@ -665,11 +759,41 @@ function drawProgramUI(ctx, selectedNode) {
         ctx.lineWidth = 2;
         ctx.strokeStyle = '#00eaff';
         ctx.stroke();
-        // Текст
         ctx.fillStyle = '#fff';
-        ctx.fillText(`${btn.label} (${btn.cost} DP)`, x + 16, y + btnH / 2);
-        // Сохраняем позицию для кликов
-        uiButtons[btn.type] = { x, y, w: btnW, h: btnH, type: btn.type };
+        let label = prog.type === 'miner' ? 'Miner' : prog.type === 'shield' ? 'Shield' : 'Sentry';
+        ctx.fillText(`Upgrade ${label} (Lvl ${prog.level+1}, ${cost} DP)`, x + 16, y + btnH/2);
+        uiButtons['upgrade'] = { x, y, w: btnW, h: btnH, type: 'upgrade', cost };
+    } else {
+        // Кнопки установки
+        const buttonData = [
+            { label: 'Miner', cost: 20, type: 'miner' },
+            { label: 'Shield', cost: 30, type: 'shield' },
+            { label: 'Sentry', cost: 40, type: 'sentry' },
+        ];
+        if (selectedNode.type === 'cpu_node') {
+            buttonData.push({ label: 'Overclocker', cost: 50, type: 'overclocker' });
+        }
+        const btnW = 120, btnH = 36, spacing = 12;
+        const startX = selectedNode.x + 40;
+        const startY = selectedNode.y - ((btnH + spacing) * buttonData.length - spacing) / 2;
+        for (let i = 0; i < buttonData.length; i++) {
+            const btn = buttonData[i];
+            const x = startX;
+            const y = startY + i * (btnH + spacing);
+            ctx.beginPath();
+            ctx.roundRect(x, y, btnW, btnH, 10);
+            ctx.fillStyle = '#232b33ee';
+            ctx.shadowColor = '#00eaff';
+            ctx.shadowBlur = 8;
+            ctx.fill();
+            ctx.shadowBlur = 0;
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = '#00eaff';
+            ctx.stroke();
+            ctx.fillStyle = '#fff';
+            ctx.fillText(`${btn.label} (${btn.cost} DP)`, x + 16, y + btnH / 2);
+            uiButtons[btn.type] = { x, y, w: btnW, h: btnH, type: btn.type };
+        }
     }
     ctx.restore();
 }
@@ -694,7 +818,7 @@ function render() {
     // Враги
     for (const enemy of game_state.enemies) {
         const node = game_state.nodes[enemy.currentNodeId];
-        if (node) drawEnemy(ctx, node);
+        if (node) drawEnemy(ctx, node, enemy.type);
     }
     // Панель ресурсов
     drawResourcePanel(ctx, game_state);
@@ -790,6 +914,23 @@ function render() {
 }
 
 function mainLoop() {
+    if (gameOver) return;
+    // --- Проверка Game Over ---
+    if (game_state.traceLevel >= 100) {
+        alert('GAME OVER: TraceLevel достиг максимума!');
+        gameOver = true;
+        return;
+    }
+    if (game_state.playerRootNodeId) {
+        const root = game_state.nodes[game_state.playerRootNodeId];
+        if (!root || root.owner !== 'player') {
+            alert('GAME OVER: Потеряна корневая нода!');
+            gameOver = true;
+            return;
+        }
+    }
+    // --- Постоянный рост traceLevel ---
+    game_state.traceLevel += 0.005;
     // Захват нод
     for (const id in game_state.nodes) {
         const node = game_state.nodes[id];
@@ -800,6 +941,12 @@ function mainLoop() {
                 node.captureProgress = 0;
                 node.owner = 'player';
                 if (!game_state.playerRootNodeId) game_state.playerRootNodeId = node.id;
+                game_state.traceLevel += 1; // +1 за захват
+                // --- Data Cache бонус ---
+                if (node.type === 'data_cache') {
+                    game_state.dp += 100;
+                    node.type = 'data';
+                }
                 console.log('Node captured:', node.id);
             }
         }
@@ -811,7 +958,7 @@ function mainLoop() {
         for (const id in game_state.nodes) {
             const node = game_state.nodes[id];
             if (node.owner === 'player' && node.program && node.program.type === 'miner') {
-                game_state.dp += 3;
+                game_state.dp += 3 * node.program.level;
                 miners++;
             }
         }
@@ -820,14 +967,32 @@ function mainLoop() {
     }
     // --- Враги ---
     if (now - lastEnemySpawn > 5000) {
-        // Спавним врага на случайной нейтральной ноде
-        const neutralNodes = Object.values(game_state.nodes).filter(n => n.owner === 'neutral');
-        if (neutralNodes.length > 0) {
-            const start = neutralNodes[Math.floor(Math.random() * neutralNodes.length)].id;
-            const path = getRandomPath(game_state.nodes, start, 6 + Math.floor(Math.random()*4));
-            const enemy = new Enemy('enemy' + (enemyIdCounter++), start, path);
-            game_state.enemies.push(enemy);
-            console.log('Enemy spawned:', enemy.id, 'path:', path);
+        // Спавним врага только на нейтральных или вражеских нодах
+        const spawnableNodes = Object.values(game_state.nodes).filter(n => n.owner !== 'player');
+        if (spawnableNodes.length > 0) {
+            const start = spawnableNodes[Math.floor(Math.random() * spawnableNodes.length)].id;
+            if (game_state.traceLevel < 40) {
+                // Обычный патрульный враг
+                const path = getRandomPath(game_state.nodes, start, 6 + Math.floor(Math.random()*4));
+                const enemy = new Enemy('enemy' + (enemyIdCounter++), start, path, 'patrol');
+                game_state.enemies.push(enemy);
+                console.log('Enemy spawned:', enemy.id, 'path:', path);
+            } else {
+                // Hunter: ищет ближайшую ноду игрока
+                const playerNodes = Object.values(game_state.nodes).filter(n => n.owner === 'player');
+                if (playerNodes.length > 0) {
+                    // Находим ближайшую к старту
+                    let minDist = Infinity, target = null;
+                    for (const n of playerNodes) {
+                        const d = getDistance(game_state.nodes[start].x, game_state.nodes[start].y, n.x, n.y);
+                        if (d < minDist) { minDist = d; target = n.id; }
+                    }
+                    const path = findPathBFS(game_state.nodes, start, target) || [start];
+                    const enemy = new Enemy('hunter' + (enemyIdCounter++), start, path, 'hunter');
+                    game_state.enemies.push(enemy);
+                    console.log('Hunter spawned:', enemy.id, 'path:', path);
+                }
+            }
         }
         lastEnemySpawn = now;
     }
@@ -872,11 +1037,9 @@ function mainLoop() {
     sentryShots = [];
     sentryFlashes = [];
     const sentryRange = 200;
-    const sentryDamage = 2.5;
     for (const id in game_state.nodes) {
         const node = game_state.nodes[id];
         if (node.owner === 'player' && node.program && node.program.type === 'sentry') {
-            // Ищем ближайшего врага в радиусе
             let nearest = null;
             let minDist = Infinity;
             for (const enemy of game_state.enemies) {
@@ -889,14 +1052,13 @@ function mainLoop() {
                 }
             }
             if (nearest) {
-                nearest.health -= sentryDamage;
-                // Визуальный эффект выстрела
+                let dmg = 2.5 * node.program.level;
+                nearest.health -= dmg;
                 sentryShots.push({
                     from: { x: node.x, y: node.y },
                     to: { x: game_state.nodes[nearest.currentNodeId].x, y: game_state.nodes[nearest.currentNodeId].y },
                     time: performance.now()
                 });
-                // Вспышка на враге
                 sentryFlashes.push({
                     x: game_state.nodes[nearest.currentNodeId].x,
                     y: game_state.nodes[nearest.currentNodeId].y,
@@ -920,8 +1082,27 @@ function mainLoop() {
                 time: performance.now()
             });
         }
+        game_state.traceLevel += 2; // +2 за уничтожение врага Sentry
         return false;
     });
+    // --- Shield: сила щита зависит от уровня ---
+    for (const id in game_state.nodes) {
+        const node = game_state.nodes[id];
+        if (node.owner === 'player' && node.program && node.program.type === 'shield') {
+            node.maxShieldHealth = 100 * node.program.level;
+            if (node.shieldHealth > node.maxShieldHealth) node.shieldHealth = node.maxShieldHealth;
+        }
+    }
+    // --- Overclocker: +1 CPU/сек на cpu_node ---
+    if (now - (mainLoop.lastCpuTick || 0) > 1000) {
+        for (const id in game_state.nodes) {
+            const node = game_state.nodes[id];
+            if (node.owner === 'player' && node.program && node.program.type === 'overclocker') {
+                game_state.cpu += 1 * node.program.level;
+            }
+        }
+        mainLoop.lastCpuTick = now;
+    }
     render();
     requestAnimationFrame(mainLoop);
 }
