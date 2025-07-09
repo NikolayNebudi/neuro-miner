@@ -677,6 +677,9 @@ if (require.main === module && process.argv[2] === 'subproc') {
                 const result = step(msg.state, msg.action);
                 gameState = result.newState;
                 process.stdout.write(JSON.stringify(result) + '\n');
+            } else if (msg.cmd === 'get_actions') {
+                const actions = getPossibleActions(msg.state);
+                process.stdout.write(JSON.stringify({ actions: actions }) + '\n');
             }
         } catch (e) {
             process.stdout.write(JSON.stringify({ error: e.message }) + '\n');
