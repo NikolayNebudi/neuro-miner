@@ -1,0 +1,821 @@
+#!/usr/bin/env node
+/**
+ * Headless Game Engine для RL-обучения
+ * Точная копия canvas_system.js без визуализации
+ * Сохраняет всю игровую логику и механики
+ */
+
+// --- Глобальные переменные ---
+let gameState = {
+    nodes: {},
+    dp: 0,
+    cpu: 0,
+    traceLevel: 0,
+    playerRootNodeId: 'hub',
+    enemies: [],
+    selectedNodeId: null,
+    hubCaptureActive: false,
+    hubCaptureProgress: 0,
+    empCooldown: 0,
+    techLevel: 1,
+    game_time: 0,
+    lastMinerTick: 0,
+    lastEnemySpawn: 0,
+    enemyIdCounter: 1,
+    win: false,
+    phase: 'PLAYING',
+    hubLevel: 1,
+};
+
+// --- Node Class ---
+class Node {
+    constructor(x, y, id, type = 'data', owner = 'neutral') {
+        this.x = x;
+        this.y = y;
+        this.id = id;
+        this.type = type;
+        this.owner = owner; // 'neutral', 'player', 'enemy'
+        this.resistance = Math.floor(Math.random() * 41) + 10; // 10-50
+        this.program = null; // { type: 'miner', level: 1 } или null
+        this.isCapturing = false;
+        this.captureProgress = 0;
+        this.neighbors = [];
+        this.randomPhase = Math.random() * Math.PI * 2;
+        this.shieldHealth = 0; // новое свойство
+        this.maxShieldHealth = 100; // новое свойство
+        this.isTargeted = false;
+        this.targetedUntil = 0;
+    }
+    addNeighbor(nodeId) {
+        if (!this.neighbors.includes(nodeId)) this.neighbors.push(nodeId);
+    }
+}
+
+// --- Enemy Class ---
+class Enemy {
+    constructor(id, currentNodeId, path, type = 'patrol') {
+        this.id = id;
+        this.currentNodeId = currentNodeId;
+        this.path = path; // массив id
+        this.pathStep = 0;
+        this.decapturing = false;
+        this.health = type === 'hunter' ? 90 : 50; // больше здоровья у hunter
+        this.type = type;
+        this.lastMove = 0;
+        this.moveInterval = type === 'hunter' ? 0.9 : 1.4; // секунды
+    }
+
+    update(deltaTime) {
+        if (!this.path || this.pathStep >= this.path.length - 1) {
+            // Пересчитываем путь
+            this.recalcPath();
+            return;
+        }
+
+        this.lastMove += deltaTime / 1000; // конвертируем в секунды
+        if (this.lastMove > this.moveInterval) {
+            this.pathStep++;
+            this.currentNodeId = this.path[this.pathStep];
+            this.lastMove = 0;
+        }
+
+        // Атака текущей ноды
+        const node = gameState.nodes[this.currentNodeId];
+        if (node && node.owner === 'player') {
+            let damage = 30 * deltaTime / 1000; // 30 урона в секунду
+            if (node.program && node.program.type === 'shield' && node.shieldHealth > 0) {
+                node.shieldHealth -= damage;
+            } else if (node.program && node.program.type !== 'sentry') {
+                node.captureProgress -= 0.3 * deltaTime / 1000;
+                if (node.captureProgress <= 0) {
+                    node.owner = 'neutral';
+                    node.program = null;
+                    node.captureProgress = 0;
+                    node.shieldHealth = 0;
+                }
+            }
+        }
+        
+        // Специальная атака hub
+        const hub = gameState.nodes['hub'];
+        if (hub && this.currentNodeId === 'hub' && hub.owner === 'player') {
+            let damage = 50 * deltaTime / 1000; // 50 урона в секунду hub
+            hub.health -= damage;
+            if (hub.health <= 0) {
+                hub.owner = 'enemy';
+                hub.health = 50;
+            }
+        }
+    }
+
+    recalcPath() {
+        // Находим ближайшую player-ноду
+        let targets = Object.values(gameState.nodes).filter(n => n.owner === 'player');
+        if (targets.length === 0) return;
+        
+        let targetNode = targets[Math.floor(Math.random() * targets.length)];
+        let path = this.findPath(gameState.nodes, this.currentNodeId, targetNode.id);
+        if (!path || path.length < 2) {
+            path = this.getRandomPath(gameState.nodes, this.currentNodeId, 8);
+        }
+        this.path = path;
+        this.pathStep = 0;
+    }
+
+    findPath(nodesObj, startId, endId) {
+        const queue = [{id: startId, path: [startId]}];
+        const visited = new Set();
+        
+        while (queue.length > 0) {
+            const current = queue.shift();
+            if (current.id === endId) return current.path;
+            
+            if (visited.has(current.id)) continue;
+            visited.add(current.id);
+            
+            const node = nodesObj[current.id];
+            if (!node) continue;
+            
+            for (const neighborId of node.neighbors) {
+                if (!visited.has(neighborId)) {
+                    queue.push({
+                        id: neighborId,
+                        path: [...current.path, neighborId]
+                    });
+                }
+            }
+        }
+        return null;
+    }
+
+    getRandomPath(nodesObj, startId, length = 5) {
+        let path = [startId];
+        let current = startId;
+        for (let i = 0; i < length; i++) {
+            const neighbors = nodesObj[current].neighbors.filter(nid => !path.includes(nid));
+            if (neighbors.length === 0) break;
+            const next = neighbors[Math.floor(Math.random() * neighbors.length)];
+            path.push(next);
+            current = next;
+        }
+        return path;
+    }
+}
+
+function getDistance(x1, y1, x2, y2) {
+    return Math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2);
+}
+
+function angleBetweenEdges(ax, ay, bx, by, cx, cy) {
+    const v1x = bx - ax, v1y = by - ay;
+    const v2x = cx - ax, v2y = cy - ay;
+    const dot = v1x * v2x + v1y * v2y;
+    const len1 = Math.sqrt(v1x * v1x + v1y * v1y);
+    const len2 = Math.sqrt(v2x * v2x + v2y * v2y);
+    if (len1 === 0 || len2 === 0) return 180;
+    let angle = Math.acos(Math.max(-1, Math.min(1, dot / (len1 * len2))));
+    return angle * 180 / Math.PI;
+}
+
+function findPathBFS(nodesObj, startId, endId) {
+    if (!startId || !endId) return null;
+    const queue = [[startId]];
+    const visited = new Set([startId]);
+    while (queue.length) {
+        const path = queue.shift();
+        const last = path[path.length - 1];
+        if (last === endId) return path;
+        for (const neighbor of nodesObj[last].neighbors) {
+            if (!visited.has(neighbor)) {
+                visited.add(neighbor);
+                queue.push([...path, neighbor]);
+            }
+        }
+    }
+    return null;
+}
+
+function getRandomPath(nodesObj, startId, length = 5) {
+    let path = [startId];
+    let current = startId;
+    for (let i = 0; i < length; i++) {
+        const neighbors = nodesObj[current].neighbors.filter(nid => !path.includes(nid));
+        if (neighbors.length === 0) break;
+        const next = neighbors[Math.floor(Math.random() * neighbors.length)];
+        path.push(next);
+        current = next;
+    }
+    return path;
+}
+
+function generateCanvasNetwork() {
+    const width = 1200, height = 800; // Фиксированные размеры для headless
+    const nodes = [];
+    nodes.push(new Node(Math.random() * (width - 200) + 100, Math.random() * (height - 200) + 100, 'hub', 'hub'));
+    const count = Math.floor(Math.random() * 11) + 25; // 25-35
+    for (let i = 0; i < count; i++) {
+        let x, y, tries = 0;
+        do {
+            x = Math.random() * (width - 200) + 100;
+            y = Math.random() * (height - 200) + 100;
+            tries++;
+        } while (nodes.some(n => getDistance(n.x, n.y, x, y) < 40) && tries < 100);
+        nodes.push(new Node(x, y, 'node'+i, 'data'));
+    }
+    // 2. MST (Крускал)
+    const edges = [];
+    for (let i = 0; i < nodes.length; i++) {
+        for (let j = i+1; j < nodes.length; j++) {
+            edges.push({a: i, b: j, dist: getDistance(nodes[i].x, nodes[i].y, nodes[j].x, nodes[j].y)});
+        }
+    }
+    edges.sort((e1, e2) => e1.dist - e2.dist);
+    class DSU { 
+        constructor(n) { 
+            this.p = Array(n).fill(0).map((_,i)=>i); 
+        } 
+        find(x) { 
+            return this.p[x]===x?x:this.p[x]=this.find(this.p[x]); 
+        } 
+        union(x,y){
+            this.p[this.find(x)]=this.find(y);
+        } 
+        connected(x,y){
+            return this.find(x)===this.find(y);
+        } 
+    }
+    const dsu = new DSU(nodes.length);
+    const mstEdges = [];
+    for (const {a, b} of edges) {
+        if (!dsu.connected(a, b)) {
+            mstEdges.push([a, b]);
+            dsu.union(a, b);
+            nodes[a].addNeighbor(nodes[b].id);
+            nodes[b].addNeighbor(nodes[a].id);
+        }
+    }
+    // 3. Добавляем дополнительные рёбра (не более 3 связей, без пересечений, с ограничением углов)
+    function edgeCrosses(a1, b1, a2, b2) {
+        function ccw(ax, ay, bx, by, cx, cy) {
+            return (cy - ay) * (bx - ax) > (by - ay) * (cx - ax);
+        }
+        return (a1 !== a2 && a1 !== b2 && b1 !== a2 && b1 !== b2) &&
+            ccw(a1.x, a1.y, a2.x, a2.y, b2.x, b2.y) !== ccw(b1.x, b1.y, a2.x, a2.y, b2.x, b2.y) &&
+            ccw(a1.x, a1.y, b1.x, b1.y, a2.x, a2.y) !== ccw(a1.x, a1.y, b1.x, b1.y, b2.x, b2.y);
+    }
+    const allEdges = [...mstEdges];
+    for (const {a, b} of edges) {
+        if (nodes[a].neighbors.length >= 3 || nodes[b].neighbors.length >= 3) continue;
+        if (nodes[a].neighbors.includes(nodes[b].id)) continue;
+        // Глобальная проверка на пересечение с любым существующим ребром
+        let crosses = false;
+        for (const [i1, j1] of allEdges) {
+            const n1 = nodes[i1], n2 = nodes[j1];
+            if (edgeCrosses(nodes[a], nodes[b], n1, n2)) {
+                crosses = true; break;
+            }
+        }
+        if (crosses) continue;
+        // Проверка "сквозного" прохождения через другие ноды
+        let passesThroughNode = false;
+        for (const n of nodes) {
+            if (n === nodes[a] || n === nodes[b]) continue;
+            // Расстояние от точки до отрезка
+            const px = n.x, py = n.y;
+            const x1 = nodes[a].x, y1 = nodes[a].y, x2 = nodes[b].x, y2 = nodes[b].y;
+            const dx = x2 - x1, dy = y2 - y1;
+            const len2 = dx*dx + dy*dy;
+            let t = ((px - x1) * dx + (py - y1) * dy) / len2;
+            t = Math.max(0, Math.min(1, t));
+            const projx = x1 + t * dx;
+            const projy = y1 + t * dy;
+            const dist = Math.sqrt((px - projx) ** 2 + (py - projy) ** 2);
+            if (dist < 26) { passesThroughNode = true; break; }
+        }
+        if (passesThroughNode) continue;
+        // Проверка углов для обеих нод
+        let angleTooSmall = false;
+        for (const n of [a, b]) {
+            const node = nodes[n];
+            for (const neighborId of node.neighbors) {
+                const neighbor = nodes.find(x => x.id === neighborId);
+                const angle = angleBetweenEdges(node.x, node.y, neighbor.x, neighbor.y, nodes[a === n ? b : a].x, nodes[a === n ? b : a].y);
+                if (angle < 25) { angleTooSmall = true; break; }
+            }
+            if (angleTooSmall) break;
+        }
+        if (angleTooSmall) continue;
+        nodes[a].addNeighbor(nodes[b].id);
+        nodes[b].addNeighbor(nodes[a].id);
+        allEdges.push([a, b]);
+    }
+    // --- Формируем nodesObj для визуализации ---
+    const nodesObj = {};
+    for (const n of nodes) nodesObj[n.id] = n;
+    // --- Спец.ноды ---
+    // cpu_node
+    let candidates = nodes.filter(n => n.type === 'data');
+    for (let i = 0; i < Math.floor(Math.random()*2)+1; i++) {
+        if (candidates.length === 0) break;
+        let idx = Math.floor(Math.random()*candidates.length);
+        candidates[idx].type = 'cpu_node';
+        candidates.splice(idx,1);
+    }
+    // data_cache
+    candidates = nodes.filter(n => n.type === 'data');
+    for (let i = 0; i < Math.floor(Math.random()*2)+1; i++) {
+        if (candidates.length === 0) break;
+        let idx = Math.floor(Math.random()*candidates.length);
+        candidates[idx].type = 'data_cache';
+        candidates.splice(idx,1);
+    }
+    return nodesObj;
+}
+
+function initializeGame() {
+    gameState.nodes = generateCanvasNetwork();
+    gameState.nodes['hub'].owner = 'player';
+    gameState.dp = 50;
+    gameState.cpu = 20;
+    gameState.traceLevel = 0;
+    gameState.enemies = [];
+    gameState.phase = 'PLAYING';
+    gameState.win = false;
+    gameState.hubCaptureActive = false;
+    gameState.hubCaptureProgress = 0;
+    gameState.empCooldown = 0;
+    gameState.hubLevel = 1;
+    gameState.game_time = 0;
+    gameState.lastMinerTick = 0;
+    gameState.lastEnemySpawn = 0;
+    gameState.enemyIdCounter = 1;
+}
+
+function updateGame(deltaTime) {
+    if (gameState.phase !== 'PLAYING') return;
+
+    gameState.game_time += deltaTime;
+
+    // --- Win/Loss Conditions ---
+    if (gameState.traceLevel >= 200) {
+        gameState.phase = 'END_SCREEN'; 
+        gameState.win = false; 
+        return;
+    }
+    if (gameState.playerRootNodeId && (!gameState.nodes[gameState.playerRootNodeId] || gameState.nodes[gameState.playerRootNodeId].owner !== 'player')) {
+        gameState.phase = 'END_SCREEN'; 
+        gameState.win = false; 
+        return;
+    }
+
+    // --- Финальный захват HUB ---
+    if (gameState.hubCaptureActive) {
+        gameState.traceLevel = Math.max(gameState.traceLevel, 180);
+        gameState.hubCaptureProgress += deltaTime / 60; // ~60 секунд до победы
+        if (gameState.hubCaptureProgress >= 1) {
+            gameState.phase = 'END_SCREEN'; 
+            gameState.win = true; 
+            return;
+        }
+    }
+    
+    // --- Глобальный рост TraceLevel ---
+    gameState.traceLevel += (0.1 + gameState.traceLevel * 0.001) * deltaTime / 1000; // Растет все быстрее
+
+    // --- Логика для каждого узла ---
+    for (const id in gameState.nodes) {
+        const node = gameState.nodes[id];
+        if (!node) continue;
+
+        // 1. Захват узлов
+        if (node.isCapturing) {
+            node.captureProgress += deltaTime / 1000; // 1 секунда на захват
+            console.error(`DEBUG: Захват ноды ${id}, прогресс: ${node.captureProgress.toFixed(3)}`);
+            if (node.captureProgress >= 1) {
+                node.isCapturing = false;
+                node.captureProgress = 0;
+                node.owner = 'player';
+                node.program = null;
+                console.error(`DEBUG: Нода ${id} захвачена!`);
+                gameState.traceLevel += 5; // Значительный штраф за расширение
+                if (node.type === 'data_cache') {
+                    gameState.dp += 100;
+                    node.type = 'data'; // Бонус выдается один раз
+                }
+            }
+        }
+
+        // 2. Логика программ игрока
+        if (node.owner === 'player' && node.program) {
+            // Регенерация щита
+            if (node.program.type === 'shield') {
+                node.maxShieldHealth = 100 * Math.pow(1.5, node.program.level - 1);
+                if (node.shieldHealth < node.maxShieldHealth) {
+                    node.shieldHealth += (10 * node.program.level) * deltaTime / 1000;
+                    if (node.shieldHealth > node.maxShieldHealth) node.shieldHealth = node.maxShieldHealth;
+                }
+            }
+            // Атака Sentry
+            if (node.program.type === 'sentry') {
+                if (!node.program.cooldown || Date.now() > node.program.cooldown) {
+                    let sentryRange = 200 + 20 * (node.program.level - 1);
+                    let nearestEnemy = null, minDist = sentryRange;
+                    for (const enemy of gameState.enemies) {
+                        const enemyNode = gameState.nodes[enemy.currentNodeId];
+                        if (!enemyNode) continue;
+                        const dist = getDistance(node.x, node.y, enemyNode.x, enemyNode.y);
+                        if (dist < minDist) { minDist = dist; nearestEnemy = enemy; }
+                    }
+                    if (nearestEnemy) {
+                        let baseDmg = 5 * Math.pow(2, node.program.level - 1); // Урон удваивается с уровнем
+                        nearestEnemy.health -= baseDmg;
+                        node.program.cooldown = Date.now() + (1000 / node.program.level);
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Ресурсы (раз в секунду) ---
+    gameState.lastMinerTick += deltaTime / 1000;
+    if (gameState.lastMinerTick > 1) {
+        let dpIncome = 0, cpuIncome = 0;
+        if(gameState.nodes['hub'] && gameState.nodes['hub'].owner === 'player') dpIncome += 2; // Базовый доход от HUB
+        for (const id in gameState.nodes) {
+            const node = gameState.nodes[id];
+            if (node.owner === 'player' && node.program) {
+                const level = node.program.level;
+                if (node.program.type === 'miner') dpIncome += 3 * Math.pow(1.8, level - 1);
+                if (node.program.type === 'overclocker') cpuIncome += 1 * level;
+            }
+        }
+        gameState.dp += Math.floor(dpIncome);
+        gameState.cpu += Math.floor(cpuIncome);
+        gameState.lastMinerTick = 0;
+    }
+    
+    // --- Враги ---
+    gameState.lastEnemySpawn += deltaTime / 1000;
+    const spawnInterval = gameState.hubCaptureActive ? 2 : Math.max(1.5, (10 - (gameState.traceLevel * 0.02)) ); // секунды
+    if (gameState.lastEnemySpawn > spawnInterval) {
+        const spawnableNodes = Object.values(gameState.nodes).filter(n => n.owner !== 'player' && n.type !== 'hub');
+        if (spawnableNodes.length > 0) {
+            const startNode = spawnableNodes[Math.floor(Math.random() * spawnableNodes.length)];
+            let enemyType = (gameState.traceLevel > 50 || gameState.hubCaptureActive) ? 'hunter' : 'patrol';
+            let path;
+            if (enemyType === 'hunter') {
+                let targets = Object.values(gameState.nodes).filter(n => n.owner === 'player' && n.program?.type === 'miner' || n.type === 'cpu_node');
+                if (targets.length === 0) targets = Object.values(gameState.nodes).filter(n => n.owner === 'player');
+                
+                if (targets.length > 0) {
+                    let targetNode = targets[Math.floor(Math.random() * targets.length)];
+                    path = findPathBFS(gameState.nodes, startNode.id, targetNode.id);
+                    if (gameState.nodes[targetNode.id]) {
+                        gameState.nodes[targetNode.id].isTargeted = true;
+                        gameState.nodes[targetNode.id].targetedUntil = Date.now() + 3000;
+                    }
+                }
+            }
+            if (!path || path.length < 2) path = getRandomPath(gameState.nodes, startNode.id, 10);
+            
+            const enemy = new Enemy('e' + gameState.enemyIdCounter++, startNode.id, path, enemyType);
+            enemy.lastMove = 0; // таймер движения
+            gameState.enemies.push(enemy);
+        }
+        gameState.lastEnemySpawn = 0;
+    }
+
+    // Логика врагов (движение, атака)
+    for (const enemy of gameState.enemies) {
+        if (enemy.isStunnedUntil > Date.now()) continue;
+        if (!enemy.path || enemy.pathStep >= enemy.path.length - 1) {
+            // Пересчитываем путь
+            let targets = Object.values(gameState.nodes).filter(n => n.owner === 'player');
+            if (targets.length > 0) {
+                let targetNode = targets[Math.floor(Math.random() * targets.length)];
+                let path = findPathBFS(gameState.nodes, enemy.currentNodeId, targetNode.id);
+                if (!path || path.length < 2) path = getRandomPath(gameState.nodes, enemy.currentNodeId, 8);
+                enemy.path = path;
+                enemy.pathStep = 0;
+            }
+            continue;
+        }
+        if (enemy.lastMove === undefined) enemy.lastMove = 0;
+        enemy.lastMove += deltaTime / 1000;
+        let moveInterval = (enemy.type === 'hunter' ? 0.9 : 1.4); // секунды
+        if (enemy.lastMove > moveInterval) {
+            enemy.pathStep++; 
+            enemy.currentNodeId = enemy.path[enemy.pathStep]; 
+            enemy.lastMove = 0;
+        }
+        const node = gameState.nodes[enemy.currentNodeId];
+        if (node && node.owner === 'player') {
+            let damage = 30 * deltaTime / 1000;
+            if (node.program?.type === 'shield' && node.shieldHealth > 0) {
+                node.shieldHealth -= damage;
+            } else if (node.program?.type !== 'sentry') {
+                node.captureProgress -= 0.3 * deltaTime / 1000;
+                if (node.captureProgress <= 0) {
+                    node.owner = 'neutral'; 
+                    node.program = null; 
+                    node.captureProgress = 0; 
+                    node.shieldHealth = 0;
+                }
+            }
+        }
+    }
+    
+    // --- Очистка и таймеры ---
+    const killedEnemies = gameState.enemies.filter(e => e.health <= 0);
+    if(killedEnemies.length > 0) {
+        gameState.traceLevel += 3 * killedEnemies.length;
+        gameState.dp += 15 * killedEnemies.length;
+    }
+    gameState.enemies = gameState.enemies.filter(e => e.health > 0);
+    
+    if (gameState.empCooldown > 0) gameState.empCooldown -= deltaTime;
+    for (const id in gameState.nodes) {
+        const node = gameState.nodes[id];
+        if (node.isTargeted && Date.now() > node.targetedUntil) node.isTargeted = false;
+    }
+}
+
+// --- Действия игрока ---
+function performAction(action) {
+    console.error(`DEBUG: performAction вызвана с:`, JSON.stringify(action));
+    if (gameState.phase !== 'PLAYING') return false;
+
+    const actionType = action.action;
+    const targetNodeId = action.targetNodeId;
+    console.error(`DEBUG: actionType=${actionType}, targetNodeId=${targetNodeId}`);
+
+    switch (actionType) {
+        case 'build_miner':
+            return buildProgram('miner', targetNodeId);
+        case 'build_sentry':
+            return buildProgram('sentry', targetNodeId);
+        case 'build_shield':
+            return buildProgram('shield', targetNodeId);
+        case 'build_overclocker':
+            return buildProgram('overclocker', targetNodeId);
+        case 'upgrade':
+            return upgradeProgram(targetNodeId);
+        case 'upgrade_hub':
+            return upgradeHub();
+        case 'network_capture':
+            return networkCapture();
+        case 'emp_blast':
+            return empBlast();
+        case 'capture':
+            return captureNode(targetNodeId);
+        default:
+            console.error(`DEBUG: Неизвестный тип действия: ${actionType}`);
+            return false;
+    }
+}
+
+function buildProgram(programType, nodeId) {
+    const node = gameState.nodes[nodeId];
+    if (!node || node.owner !== 'player') return false;
+
+    // Точные стоимости из основного движка
+    const costs = {
+        'miner': 20,
+        'sentry': 40,
+        'shield': 30,
+        'overclocker': 50
+    };
+
+    if (programType === 'overclocker' && node.type !== 'cpu_node') return false;
+    if (node.program) return false;
+
+    const cost = costs[programType];
+    if (gameState.dp < cost) return false;
+
+    gameState.dp -= cost;
+    node.program = { type: programType, level: 1 };
+    return true;
+}
+
+function upgradeProgram(nodeId) {
+    const node = gameState.nodes[nodeId];
+    if (!node || !node.program) return false;
+
+    // Точная логика апгрейда из основного движка
+    let baseCost = node.program.type === 'miner' ? 20 : node.program.type === 'shield' ? 30 : 40;
+    let cost = baseCost * node.program.level;
+    let cpuCost = 5 * node.program.level;
+    
+    if (gameState.dp < cost || gameState.cpu < cpuCost || node.program.level >= gameState.hubLevel) return false;
+
+    gameState.dp -= cost;
+    gameState.cpu -= cpuCost;
+    node.program.level++;
+    return true;
+}
+
+function upgradeHub() {
+    // Точная стоимость из основного движка
+    let cost = 30 * gameState.hubLevel;
+    if (gameState.cpu < cost) return false;
+
+    gameState.cpu -= cost;
+    gameState.hubLevel++;
+    return true;
+}
+
+function networkCapture() {
+    if (gameState.dp < 20) return false;
+    
+    gameState.dp -= 20;
+    gameState.traceLevel++;
+    
+    // Бонус за network capture
+    gameState.dp += 10;
+    return true;
+}
+
+function empBlast() {
+    if (gameState.empCooldown > 0) return false;
+    if (gameState.cpu < 50) return false;
+
+    gameState.cpu -= 50;
+    gameState.empCooldown = 8000; // 8 секунд
+
+    // Оглушаем всех врагов
+    for (const enemy of gameState.enemies) {
+        enemy.isStunnedUntil = Date.now() + 3500;
+    }
+    return true;
+}
+
+function captureNode(nodeId) {
+    console.error(`DEBUG: captureNode вызвана для ноды ${nodeId}`);
+    const node = gameState.nodes[nodeId];
+    if (!node || node.owner !== 'neutral') {
+        console.error(`DEBUG: Нода ${nodeId} не найдена или не нейтральная (owner: ${node?.owner})`);
+        return false;
+    }
+
+    // Если уже идет захват — не сбрасываем прогресс, просто возвращаем true
+    if (node.isCapturing) {
+        console.error(`DEBUG: Node ${nodeId} уже захватывается, прогресс: ${node.captureProgress}`);
+        return true;
+    }
+
+    // Проверяем, есть ли сосед-союзник
+    let hasPlayerNeighbor = node.neighbors.some(nid => gameState.nodes[nid] && gameState.nodes[nid].owner === 'player');
+    if (!hasPlayerNeighbor) {
+        console.error(`DEBUG: У ноды ${nodeId} нет соседей-игроков`);
+        return false;
+    }
+
+    const cost = 10; // Точная стоимость из основного движка
+    if (gameState.dp < cost) {
+        console.error(`DEBUG: Недостаточно DP для захвата ${nodeId} (нужно: ${cost}, есть: ${gameState.dp})`);
+        return false;
+    }
+
+    gameState.dp -= cost;
+    node.isCapturing = true;
+    node.captureProgress = 0;
+    console.error(`DEBUG: Начинаем захват ноды ${nodeId}, isCapturing=${node.isCapturing}, progress=${node.captureProgress}`);
+    return true;
+}
+
+// --- Получение состояния игры ---
+function getGameState() {
+    const stats = {
+        playerNodes: Object.values(gameState.nodes).filter(n => n.owner === 'player').length,
+        totalNodes: Object.keys(gameState.nodes).length,
+        dp: gameState.dp,
+        cpu: gameState.cpu,
+        traceLevel: gameState.traceLevel,
+        hubLevel: gameState.hubLevel,
+        enemies: gameState.enemies.length,
+        win: gameState.win,
+        phase: gameState.phase
+    };
+
+    return {
+        nodes: gameState.nodes,
+        stats: stats,
+        enemies: gameState.enemies,
+        win: gameState.win,
+        done: gameState.phase === 'END_SCREEN'
+    };
+}
+
+// --- Получение возможных действий ---
+function getPossibleActions() {
+    const actions = ['wait'];
+    
+    // Проверяем возможность строительства
+    for (const nodeId in gameState.nodes) {
+        const node = gameState.nodes[nodeId];
+        if (node.owner === 'player' && !node.program) {
+            actions.push('build_miner');
+            actions.push('build_sentry');
+            actions.push('build_shield');
+            if (node.type === 'cpu_node') {
+                actions.push('build_overclocker');
+            }
+        }
+    }
+
+    // Проверяем возможность апгрейда
+    for (const nodeId in gameState.nodes) {
+        const node = gameState.nodes[nodeId];
+        if (node.owner === 'player' && node.program) {
+            actions.push('upgrade');
+        }
+    }
+
+    // Проверяем возможность захвата
+    for (const nodeId in gameState.nodes) {
+        const node = gameState.nodes[nodeId];
+        if (node.owner === 'neutral') {
+            // Проверяем, есть ли сосед-союзник
+            let hasPlayerNeighbor = node.neighbors.some(nid => gameState.nodes[nid] && gameState.nodes[nid].owner === 'player');
+            if (hasPlayerNeighbor) {
+                actions.push('capture');
+            }
+        }
+    }
+
+    // Проверяем возможность network capture
+    if (gameState.dp >= 20) {
+        actions.push('network_capture');
+    }
+
+    // Проверяем возможность EMP blast
+    if (gameState.empCooldown <= 0 && gameState.cpu >= 50) {
+        actions.push('emp_blast');
+    }
+
+    // Проверяем возможность апгрейда hub
+    if (gameState.cpu >= gameState.hubLevel * 30) {
+        actions.push('upgrade_hub');
+    }
+
+    return actions;
+}
+
+// --- Интерфейс для RL ---
+function reset() {
+    initializeGame();
+    return getGameState();
+}
+
+function step(action) {
+    console.error(`DEBUG: step вызвана с действием:`, JSON.stringify(action));
+    const success = performAction(action.action);
+    console.error(`DEBUG: performAction вернул:`, success);
+    const reward = success ? 1 : -1;
+    
+    updateGame(16); // 60 FPS
+    
+    return {
+        newState: getGameState(),
+        reward: reward,
+        done: gameState.phase === 'END_SCREEN',
+        win: gameState.win
+    };
+}
+
+// --- Интерфейс команд для Python ---
+function handleCommand(command) {
+    switch (command.cmd) {
+        case 'reset':
+            return reset();
+        case 'step':
+            return step(command);
+        case 'get_state':
+            return getGameState();
+        case 'get_actions':
+            return { actions: getPossibleActions() };
+        default:
+            return { error: 'Unknown command' };
+    }
+}
+
+// --- Чтение команд из stdin ---
+const readline = require('readline');
+const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: false
+});
+
+rl.on('line', (line) => {
+    try {
+        const command = JSON.parse(line);
+        const result = handleCommand(command);
+        console.log(JSON.stringify(result));
+    } catch (error) {
+        console.log(JSON.stringify({ error: error.message }));
+    }
+});
+
+// Инициализация при запуске
+initializeGame(); 
