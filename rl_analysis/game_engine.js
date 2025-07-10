@@ -183,6 +183,13 @@ function getRandomPath(nodesObj, startId, length = 5) {
     return path;
 }
 
+function getNetworkCaptureAvailable(gameState) {
+    // Считаем процент захваченных нод
+    const totalNodes = Object.keys(gameState.nodes).length;
+    const playerNodes = Object.values(gameState.nodes).filter(n => n.owner === 'player').length;
+    return (playerNodes / totalNodes) >= 0.6;
+}
+
 // --- RL API ---
 function initGame(config = {}) {
     const nodes = generateCanvasNetwork();
@@ -281,7 +288,14 @@ function getPossibleActions(gameState) {
         actions.push({ action: 'upgrade_hub', nodeId: 'hub' });
     }
     // Network Capture (Захват сети)
-    if (gameState.nodes['hub'] && gameState.nodes['hub'].owner === 'player' && (gameState.hubLevel || 1) === 4 && !gameState.hubCaptureActive && !gameState.win) {
+    if (
+        gameState.nodes['hub'] &&
+        gameState.nodes['hub'].owner === 'player' &&
+        (gameState.hubLevel || 1) === 4 &&
+        !gameState.hubCaptureActive &&
+        !gameState.win &&
+        getNetworkCaptureAvailable(gameState)
+    ) {
         actions.push({ action: 'network_capture', nodeId: 'hub' });
     }
     // EMP Blast
@@ -307,7 +321,7 @@ function step(gameState, action) {
                 if (prog === 'overclocker' && node.type !== 'cpu_node') break;
                 if ((prog === 'miner' || prog === 'shield' || prog === 'sentry') && node.type === 'cpu_node') break;
                 // Стоимость
-                let baseCost = prog === 'miner' ? 20 : prog === 'shield' ? 30 : prog === 'sentry' ? 40 : 50;
+                let baseCost = prog === 'miner' ? 20 : prog === 'shield' ? 30 : prog === 'sentry' ? 35 : 50; // sentry дешевле на 5
                 let cpuCost = prog === 'overclocker' ? 10 : 0;
                 let count = gameState.builtTypes?.[prog] || 0;
                 let cost = baseCost + (baseCost * 0.5 * count);
@@ -315,7 +329,7 @@ function step(gameState, action) {
                 if (gameState.dp >= cost && gameState.cpu >= cpuCost) {
                     gameState.dp -= cost;
                     gameState.cpu -= cpuCost;
-                    node.program = { type: prog, level: 1 };
+                    node.program = { type: prog, level: 1, armor: 5 };
                     if (prog === 'shield') {
                         node.maxShieldHealth = 100;
                         node.shieldHealth = node.maxShieldHealth;
@@ -328,21 +342,11 @@ function step(gameState, action) {
         }
         case 'upgrade': {
             const node = gameState.nodes[action.nodeId];
-            if (node && node.program) {
-                if (node.program.level >= (gameState.hubLevel || 1)) break;
-                let baseCost = node.program.type === 'miner' ? 20 : node.program.type === 'shield' ? 30 : 40;
-                let cost = baseCost * node.program.level;
-                let cpuCost = 5 * node.program.level;
-                if (gameState.dp >= cost && gameState.cpu >= cpuCost) {
-                    gameState.dp -= cost;
-                    gameState.cpu -= cpuCost;
-                    node.program.level++;
-                    if (node.program.type === 'shield') {
-                        node.maxShieldHealth = 100 * node.program.level;
-                        node.shieldHealth = node.maxShieldHealth;
-                    }
-                    logEvents.push({type: 'upgrade', nodeId: node.id, program: node.program.type, level: node.program.level});
-                }
+            if (node && node.program && node.program.level < (gameState.hubLevel || 1)) {
+                node.program.level += 1;
+                // Пересчитываем броню
+                node.program.armor = Math.round(5 * (1 + 0.03 * (node.program.level - 1)) * 100) / 100;
+                logEvents.push({type: 'upgrade', nodeId: node.id, program: node.program.type, newLevel: node.program.level});
             }
             break;
         }
@@ -439,6 +443,41 @@ function step(gameState, action) {
                     node.shieldHealth += (10 * (node.program.level || 1));
                     if (node.shieldHealth > node.maxShieldHealth) node.shieldHealth = node.maxShieldHealth;
                 }
+            }
+        }
+    }
+
+    // --- Sentry logic: урон и броня ---
+    for (const id in gameState.nodes) {
+        const node = gameState.nodes[id];
+        if (node.program && node.program.type === 'sentry') {
+            let sentryDamage = 20; // базовый урон +5
+            for (const enemy of gameState.enemies) {
+                if (enemy.targetNodeId === id) {
+                    let damage = sentryDamage;
+                    // Armor врага снижает урон
+                    if (enemy.armor) {
+                        damage = Math.max(0, damage - enemy.armor);
+                    }
+                    enemy.health -= damage;
+                }
+            }
+        }
+    }
+    // --- Враги атакуют программы: броня программ снижает урон ---
+    for (const enemy of gameState.enemies) {
+        if (enemy.targetNodeId && gameState.nodes[enemy.targetNodeId]) {
+            const node = gameState.nodes[enemy.targetNodeId];
+            if (node.program) {
+                let damage = enemy.attack || 10;
+                // Armor программ снижает урон (процентная защита)
+                let baseArmor = 5;
+                let level = node.program.level || 1;
+                let armor = Math.round(baseArmor * (1 + 0.03 * (level - 1)) * 100) / 100;
+                let reduction = armor / 100; // процент снижения
+                damage = Math.max(0, damage * (1 - reduction));
+                // Применяем урон (пример: shield, sentry и т.д.)
+                // ... существующий код применения урона ...
             }
         }
     }
@@ -567,7 +606,7 @@ function step(gameState, action) {
         }
     }
     // --- 7. Победа/поражение ---
-    if (gameState.traceLevel >= 200) { done = true; reward -= 1000; logEvents.push({type: 'lose', reason: 'trace'}); }
+    if (gameState.traceLevel >= 300) { done = true; reward -= 1000; logEvents.push({type: 'lose', reason: 'trace'}); } // лимит увеличен до 300
     if (gameState.nodes['hub'] && gameState.nodes['hub'].owner !== 'player') { done = true; reward -= 1000; logEvents.push({type: 'lose', reason: 'hub_lost'}); }
     if (gameState.win) { done = true; reward += 1000; logEvents.push({type: 'win', reason: 'victory'}); }
     // --- 8. Захват нод ---

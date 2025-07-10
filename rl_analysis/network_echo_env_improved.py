@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Улучшенная версия NetworkEchoEnv с исправлением проблем нестабильности
+Улучшенная версия NetworkEchoEnv с оптимизированными наградами
+Исправляет проблемы с вечным ожиданием и улучшает функцию наград
 """
 
 import gymnasium as gym
@@ -10,11 +11,12 @@ import subprocess
 import json
 import os
 from datetime import datetime
+import time
 
 class NetworkEchoEnvImproved(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 4}
 
-    def __init__(self, config=None):
+    def __init__(self, config=None, log_actions=False, log_path="improved_actions_log.jsonl", max_log_entries=10000):
         super().__init__()
         self.proc = None
         self._actions = self._define_actions()
@@ -23,296 +25,400 @@ class NetworkEchoEnvImproved(gym.Env):
         self._state = None
         self._config = config or {}
         
-        # Улучшенные параметры
-        self.stage = self._config.get('stage', 0)
-        self.mode = self._config.get('mode', 'full')
-        self.reduce_randomness = self._config.get('reduce_randomness', False)
-        self.improved_rewards = self._config.get('improved_rewards', False)
-        self.curriculum_learning = self._config.get('curriculum_learning', False)
+        # Логирование
+        self.log_actions = log_actions
+        self.log_path = log_path
+        self.max_log_entries = max_log_entries
+        self.log_entries_count = 0
+        self.log_file = None
         
-        # Статистика для улучшенных наград
-        self.episode_stats = {
-            'resources_gained': 0,
-            'nodes_captured': 0,
-            'programs_built': 0,
-            'enemies_killed': 0,
-            'efficiency_score': 0,
-            'exploration_bonus': 0
-        }
+        # Счетчики для улучшенных наград
+        self._last_owned_nodes = 0
+        self._last_dp = 0
+        self._last_cpu = 0
+        self._last_trace_level = 0
+        self._step_count = 0
+        self._max_steps = 2000  # Ограничение шагов для предотвращения вечного цикла
         
-        # Параметры для уменьшения случайности
-        self.enemy_spawn_rate = 0.1 if self.reduce_randomness else 0.15
-        self.resource_spawn_rate = 0.2 if self.reduce_randomness else 0.3
-        
-        # Параметры curriculum learning
-        self.stage_difficulty = {
-            0: {'enemy_spawn_rate': 0.05, 'win_threshold': 0.3, 'max_enemies': 3},
-            1: {'enemy_spawn_rate': 0.1, 'win_threshold': 0.5, 'max_enemies': 5},
-            2: {'enemy_spawn_rate': 0.15, 'win_threshold': 0.8, 'max_enemies': 10}
-        }
+        if self.log_actions:
+            self._setup_logging()
+
+    def _setup_logging(self):
+        """Настройка логирования"""
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.log_path = f"improved_log_{timestamp}.jsonl"
+            self.log_file = open(self.log_path, 'w')
+            print(f"📝 Логирование включено: {self.log_path}")
+        except Exception as e:
+            print(f"❌ Ошибка настройки логирования: {e}")
+            self.log_actions = False
 
     def _define_actions(self):
-        """Определяет действия с улучшенной структурой"""
-        actions = [{"action": "wait"}]
-        
-        # Действия захвата и строительства для каждой ноды
-        for i in range(1, 25):
-            actions.append({"action": "capture", "nodeId": f"n{i}"})
-            actions.append({"action": "build", "nodeId": f"n{i}", "program": "miner"})
-            actions.append({"action": "build", "nodeId": f"n{i}", "program": "sentry"})
-            actions.append({"action": "build", "nodeId": f"n{i}", "program": "shield"})
-            actions.append({"action": "build", "nodeId": f"n{i}", "program": "overclocker"})
-        
-        # Действия для HUB
-        actions.append({"action": "upgrade_hub"})
-        actions.append({"action": "network_capture"})
-        actions.append({"action": "emp_blast"})
-        
-        return actions
-
-    def _state_to_observation(self, state):
-        """Улучшенное преобразование состояния в наблюдение"""
-        # Базовые глобальные фичи
-        arr = [
-            state.get('dp', 0) / 1000.0,
-            state.get('cpu', 0) / 200.0,
-            state.get('traceLevel', 0) / 200.0,
-            min(len(state.get('enemies', [])) / 10.0, 1.0),
-            state.get('tick', 0) / 10000.0,
-            state.get('hubCaptureProgress', 0) / 100.0,
-            min(state.get('empCooldown', 0) / 30.0, 1.0),  # Ограничиваем до 1.0
+        """Определяет возможные действия"""
+        return [
+            "build", "capture", "upgrade_hub", "emp_blast", 
+            "network_capture", "wait"
         ]
-        
-        # Улучшенные фичи для каждой ноды
-        for i in range(1, 25):
-            node = state['nodes'].get(f'n{i}', {})
+
+    def _start_game(self):
+        """Запускает игру с таймаутом"""
+        import shutil
+        try:
+            game_engine_path = os.path.join(os.path.dirname(__file__), "game_engine.js")
+            node_path = shutil.which("node") or "node"
             
-            # Владелец ноды
-            arr.append(1 if node.get('owner') == 'player' else 0)
-            arr.append(1 if node.get('owner') == 'enemy' else 0)
-            arr.append(1 if node.get('owner') == 'neutral' else 0)
+            # Запускаем процесс с таймаутом
+            self.proc = subprocess.Popen(
+                [node_path, game_engine_path, "subproc"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1
+            )
             
-            # Программа на ноде
-            program = node.get('program', {})
-            arr.append(1 if program.get('type') == 'miner' else 0)
-            arr.append(1 if program.get('type') == 'sentry' else 0)
-            arr.append(1 if program.get('type') == 'shield' else 0)
-            arr.append(1 if program.get('type') == 'overclocker' else 0)
-            arr.append(program.get('level', 0) / 10.0)  # Уровень программы
+            # Инициализируем игру с таймаутом
+            init_command = json.dumps({"cmd": "reset", "config": self._config})
+            self.proc.stdin.write(init_command + "\n")
+            self.proc.stdin.flush()
             
-            # Щит
-            arr.append(node.get('shieldHealth', 0) / float(node.get('maxShieldHealth', 100) or 100))
+            # Ждем ответа с таймаутом
+            start_time = time.time()
+            response = None
+            while time.time() - start_time < 5.0:  # 5 секунд таймаут
+                if self.proc.stdout.readable():
+                    response = self.proc.stdout.readline()
+                    if response:
+                        break
+                time.sleep(0.1)
             
-            # Соседи (улучшенная информация)
-            neighbors = node.get('neighbors', []) if node else []
-            for ni in range(3):
-                if ni < len(neighbors):
-                    n_id = neighbors[ni]
-                    n = state['nodes'].get(n_id, {})
-                    arr.append(1 if n.get('owner') == 'player' else 0)
-                    arr.append(1 if n.get('owner') == 'enemy' else 0)
-                    arr.append(1 if n.get('program') else 0)
+            if not response:
+                # Проверяем ошибки
+                err = self.proc.stderr.read()
+                if err:
+                    print(f'STDERR: {err}')
+                raise Exception("Таймаут при запуске game_engine.js")
+            
+            # Парсим начальное состояние
+            self._state = json.loads(response)
+            return True
+        except Exception as e:
+            print(f"❌ Ошибка запуска игры: {e}")
+            return False
+
+    def _send_action(self, action):
+        """Отправляет действие в игру с таймаутом"""
+        try:
+            if self.proc and self.proc.poll() is None:
+                step_command = json.dumps({
+                    "cmd": "step",
+                    "state": self._state,
+                    "action": action
+                })
+                self.proc.stdin.write(step_command + "\n")
+                self.proc.stdin.flush()
+                return True
+            return False
+        except Exception as e:
+            print(f"❌ Ошибка отправки действия: {e}")
+            return False
+
+    def _get_state(self):
+        """Получает состояние игры с таймаутом"""
+        try:
+            if self.proc and self.proc.poll() is None:
+                start_time = time.time()
+                response = None
+                while time.time() - start_time < 3.0:  # 3 секунды таймаут
+                    if self.proc.stdout.readable():
+                        response = self.proc.stdout.readline()
+                        if response:
+                            break
+                    time.sleep(0.1)
+                
+                if response:
+                    result = json.loads(response)
+                    if 'error' in result:
+                        print(f"❌ Ошибка игры: {result['error']}")
+                        return None
+                    return result
                 else:
-                    arr += [0, 0, 0]
-        
-        # Дополняем до нужной длины
-        arr += [0] * (439 - len(arr))
-        return np.array(arr, dtype=np.float32)
+                    print("⚠️ Таймаут при получении состояния")
+                    return None
+            return None
+        except Exception as e:
+            print(f"❌ Ошибка получения состояния: {e}")
+            return None
 
-    def _calculate_improved_reward(self, old_state, new_state, action):
-        """Вычисляет улучшенную награду с промежуточными наградами"""
-        base_reward = 0
+    def _calculate_improved_reward(self, result, base_reward):
+        """Вычисляет улучшенную награду"""
+        if not result or 'newState' not in result:
+            return base_reward
         
-        if not self.improved_rewards:
-            return new_state.get('reward', 0)
+        new_state = result['newState']
+        stats = result.get('stats', {})
         
-        # Награда за ресурсы
-        dp_gained = new_state.get('dp', 0) - old_state.get('dp', 0)
-        cpu_gained = new_state.get('cpu', 0) - old_state.get('cpu', 0)
-        base_reward += dp_gained * 0.01  # Награда за DP
-        base_reward += cpu_gained * 0.02  # Награда за CPU
+        # Базовые метрики
+        current_owned_nodes = stats.get('playerNodes', 0)
+        current_dp = stats.get('dp', 0)
+        current_cpu = stats.get('cpu', 0)
+        current_trace_level = stats.get('traceLevel', 0)
         
-        # Награда за захват нод
-        old_player_nodes = sum(1 for n in old_state.get('nodes', {}).values() if n.get('owner') == 'player')
-        new_player_nodes = sum(1 for n in new_state.get('nodes', {}).values() if n.get('owner') == 'player')
-        nodes_captured = new_player_nodes - old_player_nodes
-        base_reward += nodes_captured * 0.5  # Награда за захват
+        # Вычисляем изменения
+        node_change = current_owned_nodes - self._last_owned_nodes
+        dp_change = current_dp - self._last_dp
+        cpu_change = current_cpu - self._last_cpu
+        trace_change = current_trace_level - self._last_trace_level
         
-        # Награда за строительство программ
-        old_programs = sum(1 for n in old_state.get('nodes', {}).values() if n.get('program'))
-        new_programs = sum(1 for n in new_state.get('nodes', {}).values() if n.get('program'))
-        programs_built = new_programs - old_programs
-        base_reward += programs_built * 0.3  # Награда за программы
+        # Улучшенная награда
+        improved_reward = base_reward
         
-        # Награда за убийство врагов
-        enemies_killed = len([e for e in new_state.get('logEvents', []) if e.get('type') == 'enemy_destroyed'])
-        base_reward += enemies_killed * 1.0  # Награда за врагов
+        # Бонусы за положительные изменения
+        if node_change > 0:
+            improved_reward += node_change * 50  # Бонус за захват узлов
+        elif node_change < 0:
+            improved_reward += node_change * 30  # Штраф за потерю узлов
         
-        # Штраф за потерю нод
-        old_enemy_nodes = sum(1 for n in old_state.get('nodes', {}).values() if n.get('owner') == 'enemy')
-        new_enemy_nodes = sum(1 for n in new_state.get('nodes', {}).values() if n.get('owner') == 'enemy')
-        nodes_lost = old_enemy_nodes - new_enemy_nodes
-        base_reward -= nodes_lost * 0.3  # Штраф за потерю
+        # Бонусы за ресурсы
+        if dp_change > 0:
+            improved_reward += dp_change * 0.1  # Бонус за DP
+        if cpu_change > 0:
+            improved_reward += cpu_change * 0.2  # Бонус за CPU
         
-        # Награда за эффективность (меньше шагов = лучше)
-        base_reward -= 0.01  # Небольшой штраф за каждый шаг
+        # Штраф за увеличение trace level
+        if trace_change > 0:
+            improved_reward -= trace_change * 2  # Штраф за trace level
         
-        # Награда за исследование (разнообразие действий)
-        if hasattr(self, '_action_history'):
-            self._action_history.append(str(action))  # Преобразуем в строку
-            if len(self._action_history) > 10:
-                unique_actions = len(set(self._action_history[-10:]))
-                base_reward += unique_actions * 0.05  # Награда за разнообразие
-        else:
-            self._action_history = [str(action)]  # Преобразуем в строку
+        # Бонусы за действия
+        log_events = result.get('logEvents', [])
+        for event in log_events:
+            if event.get('type') == 'capture_complete':
+                improved_reward += 100  # Бонус за завершение захвата
+            elif event.get('type') == 'upgrade_hub':
+                improved_reward += 300  # Бонус за улучшение хаба
+            elif event.get('type') == 'build':
+                improved_reward += 20   # Бонус за строительство
+            elif event.get('type') == 'enemy_killed':
+                improved_reward += 15   # Бонус за убийство врага
         
-        return base_reward
+        # Бонус за выживание
+        if not result.get('done', False):
+            improved_reward += 1  # Небольшой бонус за каждый шаг
+        
+        # Обновляем предыдущие значения
+        self._last_owned_nodes = current_owned_nodes
+        self._last_dp = current_dp
+        self._last_cpu = current_cpu
+        self._last_trace_level = current_trace_level
+        
+        return improved_reward
 
-    def _apply_curriculum_learning(self):
-        """Применяет curriculum learning на основе текущего этапа"""
-        if not self.curriculum_learning:
+    def _log_episode_start(self, episode):
+        """Логирует начало эпизода"""
+        if not self.log_actions or self.log_entries_count >= self.max_log_entries:
             return
-        
-        difficulty = self.stage_difficulty.get(self.stage, self.stage_difficulty[0])
-        
-        # Настраиваем параметры окружения
-        config_update = {
-            'enemy_spawn_rate': difficulty['enemy_spawn_rate'],
-            'max_enemies': difficulty['max_enemies'],
-            'win_threshold': difficulty['win_threshold']
+            
+        log_entry = {
+            "type": "episode_start",
+            "episode": episode,
+            "timestamp": datetime.now().isoformat(),
+            "config": self._config
         }
         
-        # Отправляем обновление в игровой движок
-        if self.proc and self.proc.poll() is None:
-            try:
-                self.proc.stdin.write(json.dumps({
-                    "cmd": "update_config", 
-                    "config": config_update
-                }) + '\n')
-                self.proc.stdin.flush()
-            except:
-                pass
+        self.log_file.write(json.dumps(log_entry) + "\n")
+        self.log_file.flush()
+        self.log_entries_count += 1
+
+    def _log_action_improved(self, episode, step, action, reward, improved_reward, state_summary):
+        """Логирует действие с улучшенной наградой"""
+        if not self.log_actions or self.log_entries_count >= self.max_log_entries:
+            return
+            
+        log_entry = {
+            "type": "action",
+            "episode": episode,
+            "step": step,
+            "chosen_action": {"action": action},
+            "base_reward": reward,
+            "improved_reward": improved_reward,
+            "state_summary": state_summary,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        self.log_file.write(json.dumps(log_entry) + "\n")
+        self.log_file.flush()
+        self.log_entries_count += 1
+
+    def _log_episode_end(self, episode, total_steps, total_reward, final_score, win):
+        """Логирует конец эпизода"""
+        if not self.log_actions or self.log_entries_count >= self.max_log_entries:
+            return
+            
+        log_entry = {
+            "type": "episode_end",
+            "episode": episode,
+            "total_steps": total_steps,
+            "total_reward": total_reward,
+            "final_score": final_score,
+            "win": win,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        self.log_file.write(json.dumps(log_entry) + "\n")
+        self.log_file.flush()
+        self.log_entries_count += 1
+
+    def _extract_state_summary(self, state):
+        """Извлекает краткую сводку состояния"""
+        if not state:
+            return {}
+            
+        nodes = state.get("nodes", {})
+        node_count = len(nodes)
+        owned_nodes = sum(1 for node in nodes.values() if node.get("owner") == "player")
+        
+        summary = {
+            "game_over": state.get("win", False) or state.get("traceLevel", 0) >= 300,
+            "current_player": 0,
+            "scores": {"0": owned_nodes},
+            "node_count": node_count,
+            "owned_nodes": owned_nodes,
+            "total_nodes": node_count,
+            "available_actions": 6
+        }
+        
+        return summary
 
     def reset(self, seed=None, options=None):
-        """Сброс окружения с улучшенными настройками"""
-        self.close()
+        """Сброс окружения"""
+        super().reset(seed=seed)
         
-        # Создаем процесс с улучшенными параметрами
-        self.proc = subprocess.Popen([
-            'node', os.path.join(os.path.dirname(__file__), 'game_engine.js'), 'subproc'
-        ], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
-        
-        # Конфигурация с улучшенными параметрами
-        reset_config = {
-            'mode': self.mode,
-            'stage': self.stage,
-            'reduce_randomness': self.reduce_randomness,
-            'enemy_spawn_rate': self.enemy_spawn_rate,
-            'resource_spawn_rate': self.resource_spawn_rate
-        }
-        
-        # Применяем curriculum learning
-        if self.curriculum_learning:
-            difficulty = self.stage_difficulty.get(self.stage, self.stage_difficulty[0])
-            reset_config.update(difficulty)
-        
-        reset_msg = {"cmd": "reset", "config": reset_config}
-        self.proc.stdin.write(json.dumps(reset_msg) + '\n')
-        self.proc.stdin.flush()
-        
-        line = self.proc.stdout.readline()
-        state = json.loads(line)
-        self._state = state
-        
-        # Сбрасываем статистику эпизода
-        self.episode_stats = {
-            'resources_gained': 0,
-            'nodes_captured': 0,
-            'programs_built': 0,
-            'enemies_killed': 0,
-            'efficiency_score': 0,
-            'exploration_bonus': 0
-        }
-        
-        # Сбрасываем историю действий
-        self._action_history = []
-        
-        obs = self._state_to_observation(state)
-        return obs, {}
-
-    def step(self, action_idx):
-        """Выполнение действия с улучшенными наградами"""
-        action = self._actions[action_idx]
-        old_state = self._state.copy()
-        
-        # Отправляем действие
-        self.proc.stdin.write(json.dumps({
-            "cmd": "step", 
-            "action": action, 
-            "state": self._state
-        }) + '\n')
-        self.proc.stdin.flush()
-        
-        line = self.proc.stdout.readline()
-        result = json.loads(line)
-        
-        self._state = result['newState']
-        done = result['done']
-        
-        # Вычисляем улучшенную награду
-        if self.improved_rewards:
-            reward = self._calculate_improved_reward(old_state, self._state, action)
-        else:
-            reward = result.get('reward', 0)
-        
-        obs = self._state_to_observation(self._state)
-        info = {}
-        
-        # Детальная статистика в конце эпизода
-        if done:
-            nodes = self._state['nodes']
-            program_counts = {}
-            program_levels = {}
-            
-            for node in nodes.values():
-                prog = node.get('program')
-                if prog:
-                    t = prog['type']
-                    program_counts[t] = program_counts.get(t, 0) + 1
-                    program_levels[t] = program_levels.get(t, 0) + prog.get('level', 1)
-            
-            avg_levels = {t: (program_levels[t] / program_counts[t]) for t in program_counts}
-            enemies_killed = sum(1 for e in self._state.get('logEvents', []) if e.get('type') == 'enemy_destroyed')
-            total_dp = self._state.get('dp', 0)
-            total_cpu = self._state.get('cpu', 0)
-            
-            stats = {
-                'program_counts': program_counts,
-                'avg_levels': avg_levels,
-                'enemies_killed': enemies_killed,
-                'total_dp': total_dp,
-                'total_cpu': total_cpu,
-                'episode_stats': self.episode_stats,
-                'stage': self.stage,
-                'mode': self.mode
-            }
-            info['final_stats'] = stats
-        
-        return obs, reward, done, False, info
-
-    def set_stage(self, stage):
-        """Устанавливает этап для curriculum learning"""
-        self.stage = stage
-        self._apply_curriculum_learning()
-
-    def reduce_randomness(self):
-        """Уменьшает случайность в окружении"""
-        self.reduce_randomness = True
-        self.enemy_spawn_rate = 0.05
-        self.resource_spawn_rate = 0.2
-
-    def close(self):
-        """Закрывает процесс"""
+        # Завершаем предыдущий процесс
         if self.proc:
             self.proc.terminate()
-            self.proc = None 
+            self.proc.wait()
+        
+        # Запускаем новую игру
+        if not self._start_game():
+            raise Exception("Не удалось запустить игру")
+        
+        # Логируем начало эпизода
+        episode = getattr(self, '_episode', 0) + 1
+        self._episode = episode
+        self._log_episode_start(episode)
+        
+        # Сбрасываем счетчики
+        self._step_count = 0
+        self._total_reward = 0
+        
+        # Инициализируем предыдущие значения
+        stats = self._state.get('stats', {})
+        self._last_owned_nodes = stats.get('playerNodes', 0)
+        self._last_dp = stats.get('dp', 0)
+        self._last_cpu = stats.get('cpu', 0)
+        self._last_trace_level = stats.get('traceLevel', 0)
+        
+        return self._get_observation(), {}
+
+    def step(self, action):
+        """Выполняет шаг в игре"""
+        self._step_count += 1
+        
+        # Проверяем ограничение шагов
+        if self._step_count >= self._max_steps:
+            return self._get_observation(), 0, True, False, {}
+        
+        if self.proc is None or self.proc.poll() is not None:
+            return self._get_observation(), 0, True, False, {}
+        
+        # Отправляем действие
+        action_name = self._actions[action]
+        if not self._send_action(action_name):
+            return self._get_observation(), 0, True, False, {}
+        
+        # Получаем результат
+        result = self._get_state()
+        if not result:
+            return self._get_observation(), 0, True, False, {}
+        
+        # Обновляем состояние
+        self._state = result.get('newState', result)
+        
+        # Получаем базовую награду и статус завершения
+        base_reward = result.get('reward', 0)
+        done = result.get('done', False)
+        
+        # Вычисляем улучшенную награду
+        improved_reward = self._calculate_improved_reward(result, base_reward)
+        
+        self._total_reward += improved_reward
+        
+        # Логируем действие
+        state_summary = self._extract_state_summary(self._state)
+        self._log_action_improved(self._episode, self._step_count, action_name, base_reward, improved_reward, state_summary)
+        
+        # Логируем конец эпизода
+        if done:
+            stats = result.get('stats', {})
+            final_score = stats.get('playerNodes', 0)
+            win = result.get('win', False)
+            self._log_episode_end(self._episode, self._step_count, self._total_reward, final_score, win)
+        
+        return self._get_observation(), improved_reward, done, False, {}
+
+    def _get_observation(self):
+        """Преобразует состояние в наблюдение"""
+        if not self._state:
+            return np.zeros(439, dtype=np.float32)
+        
+        # Упрощенное преобразование состояния
+        obs = []
+        
+        nodes = self._state.get("nodes", {})
+        node_count = len(nodes)
+        owned_nodes = sum(1 for node in nodes.values() if node.get("owner") == "player")
+        
+        # Добавляем базовую информацию (нормализованную)
+        obs.extend([
+            0,  # currentPlayer (всегда 0)
+            min(node_count / 50.0, 1.0),  # Нормализуем количество узлов
+            min(len(self._state.get("availableActions", [])) / 10.0, 1.0),  # Нормализуем действия
+            1.0 if (self._state.get("win", False) or self._state.get("traceLevel", 0) >= 300) else 0.0
+        ])
+        
+        # Добавляем информацию о ресурсах (нормализованную)
+        obs.extend([
+            min(self._state.get("dp", 0) / 1000.0, 1.0),  # Нормализуем DP
+            min(self._state.get("cpu", 0) / 100.0, 1.0),   # Нормализуем CPU
+            min(self._state.get("traceLevel", 0) / 300.0, 1.0),  # Нормализуем trace level
+            min(len(self._state.get("enemies", [])) / 10.0, 1.0)  # Нормализуем врагов
+        ])
+        
+        # Добавляем информацию о узлах (упрощенную и нормализованную)
+        for node_id, node in nodes.items():
+            obs.extend([
+                1.0 if node.get("owner") == "player" else 0.0,
+                min(node.get("level", 0) / 10.0, 1.0),  # Нормализуем уровень
+                min(len(node.get("neighbors", [])) / 10.0, 1.0),  # Нормализуем соседей
+                1.0 if node.get("program") else 0.0
+            ])
+        
+        # Дополняем до нужного размера
+        while len(obs) < 439:
+            obs.append(0.0)
+        
+        return np.array(obs[:439], dtype=np.float32)
+
+    def close(self):
+        """Закрывает окружение"""
+        if self.log_file:
+            self.log_file.close()
+        
+        if self.proc:
+            self.proc.terminate()
+            self.proc.wait()
+
+    def render(self):
+        """Рендеринг (не реализован)"""
+        pass 

@@ -20,7 +20,7 @@ def test_environment():
     try:
         # Создаём окружение
         print("1. Создание окружения...")
-        env = NetworkEchoEnv()
+        env = NetworkEchoEnv(log_actions=True, log_path="actions_log.jsonl")
         print("✅ Окружение создано успешно")
         
         # Тестируем сброс

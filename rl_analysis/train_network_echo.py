@@ -76,8 +76,8 @@ class TrainingCallback(BaseCallback):
         return True
 
 def create_env(config: Dict = None) -> NetworkEchoEnv:
-    """Создаёт окружение с заданной конфигурацией"""
-    return NetworkEchoEnv(config=config)
+    """Создаёт окружение с заданной конфигурацией и логированием"""
+    return NetworkEchoEnv(config=config, log_actions=True, log_path="actions_log.jsonl")
 
 def train_model(
     model_type: str = 'PPO',

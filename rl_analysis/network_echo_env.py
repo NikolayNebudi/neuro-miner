@@ -17,7 +17,7 @@ class NetworkEchoEnv(gym.Env):
     Взаимодействует с JavaScript-движком через subprocess
     """
     
-    def __init__(self, config: Dict = None):
+    def __init__(self, config: Dict = None, log_actions: bool = False, log_path: str = "actions_log.jsonl"):
         super().__init__()
         
         self.config = config or {}
@@ -25,22 +25,19 @@ class NetworkEchoEnv(gym.Env):
         self.game_state = None
         self.step_count = 0
         self.max_steps = 5000
+        self.log_actions = log_actions
+        self.log_path = log_path
+        self.log_file = open(self.log_path, "w") if self.log_actions else None
         
-        # Определяем пространство действий
-        self.action_space = spaces.Discrete(100)  # Упрощённое представление
-        
-        # Определяем пространство наблюдений
+        self.action_space = spaces.Discrete(100)
         self.observation_space = spaces.Box(
             low=0, high=1000, 
-            shape=(50,),  # Упрощённое представление состояния
+            shape=(50,),
             dtype=np.float32
         )
-        
-        # Запускаем JavaScript-процесс
         self._start_game_process()
         
     def _start_game_process(self):
-        """Запускает JavaScript-процесс игры"""
         try:
             self.game_process = subprocess.Popen(
                 ['node', 'game_engine.js', 'subproc'],
@@ -56,7 +53,6 @@ class NetworkEchoEnv(gym.Env):
             raise
     
     def _send_command(self, command: Dict) -> Dict:
-        """Отправляет команду в JavaScript-процесс и получает ответ"""
         try:
             self.game_process.stdin.write(json.dumps(command) + '\n')
             self.game_process.stdin.flush()
@@ -153,6 +149,7 @@ class NetworkEchoEnv(gym.Env):
     
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
         self.step_count = 0
+        self.action_trace = []  # Для накопления последовательности действий
         if seed is not None:
             self.seed(seed)
         response = self._send_command({
@@ -165,11 +162,33 @@ class NetworkEchoEnv(gym.Env):
         self.game_state = response
         obs = self._encode_observation(self.game_state)
         info = {}
+        # Логируем карту и стартовое состояние
+        if self.log_actions and self.log_file:
+            map_info = {
+                'nodes': self.game_state.get('nodes', {}),
+                'playerRootNodeId': self.game_state.get('playerRootNodeId'),
+                'start_dp': self.game_state.get('dp'),
+                'start_cpu': self.game_state.get('cpu'),
+                'start_traceLevel': self.game_state.get('traceLevel'),
+                'start_hubLevel': self.game_state.get('hubLevel'),
+                'enemies': self.game_state.get('enemies', [])
+            }
+            self.log_file.write(json.dumps({
+                'event': 'episode_start',
+                'step': 0,
+                'map_info': map_info,
+                'game_state': self.game_state
+            }, ensure_ascii=False) + "\n")
         return obs, info
     
     def step(self, action: int):
         self.step_count += 1
         game_action = self._encode_action(action)
+        # Получаем все возможные действия для лога
+        possible_actions = self._send_command({
+            'cmd': 'get_actions',
+            'state': self.game_state
+        })['actions']
         response = self._send_command({
             'cmd': 'step',
             'state': self.game_state,
@@ -192,9 +211,37 @@ class NetworkEchoEnv(gym.Env):
         terminated = done
         truncated = False
         obs = self._encode_observation(self.game_state)
+        # Логирование действий и состояния
+        if self.log_actions and self.log_file:
+            log_entry = {
+                "step": self.step_count,
+                "game_state": self.game_state,
+                "possible_actions": possible_actions,
+                "chosen_action": game_action,
+                "reward": reward,
+                "terminated": terminated,
+                "truncated": truncated,
+                "info": info,
+                "log_events": response.get('logEvents', [])
+            }
+            self.action_trace.append(game_action)
+            log_entry["action_trace"] = list(self.action_trace)
+            self.log_file.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+            # Если эпизод завершён — логируем финальный trace и состояние
+            if terminated or truncated:
+                self.log_file.write(json.dumps({
+                    "event": "episode_end",
+                    "step": self.step_count,
+                    "final_state": self.game_state,
+                    "final_action_trace": list(self.action_trace),
+                    "reward": reward,
+                    "info": info
+                }, ensure_ascii=False) + "\n")
         return obs, reward, terminated, truncated, info
     
     def close(self):
+        if self.log_file:
+            self.log_file.close()
         if self.game_process:
             self.game_process.terminate()
             self.game_process.wait()
@@ -215,7 +262,7 @@ gym.register(
 )
 
 if __name__ == "__main__":
-    env = NetworkEchoEnv()
+    env = NetworkEchoEnv(log_actions=True)
     try:
         obs, info = env.reset()
         print(f"Начальное наблюдение: {obs.shape}")

@@ -23,7 +23,7 @@ def test_basic_mechanics():
         'curriculum_learning': True
     }
     
-    env = NetworkEchoEnvImproved(config=config)
+    env = NetworkEchoEnvImproved(config=config, log_actions=True, log_path="actions_log.jsonl")
     
     print("✅ Окружение создано успешно")
     

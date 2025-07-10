@@ -1,330 +1,299 @@
 #!/usr/bin/env python3
 """
-Улучшенная версия RL-обучения с исправлением всех выявленных проблем
+Улучшенный скрипт обучения с оптимизированными наградами
+Исправляет проблемы с вечным ожиданием и улучшает функцию наград
 """
 
 import os
-import csv
-import uuid
-import gymnasium as gym
-from stable_baselines3 import PPO
-from stable_baselines3.common.env_checker import check_env
-from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
-from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
-from network_echo_env_improved import NetworkEchoEnvImproved
+import sys
+import json
 import numpy as np
+from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
+from stable_baselines3.common.monitor import Monitor
+from network_echo_env_improved import NetworkEchoEnvImproved
+import matplotlib.pyplot as plt
 from datetime import datetime
+import time
 
-# УЛУЧШЕННЫЕ ПАРАМЕТРЫ
-EPISODES_PER_STAGE = 500000  # Увеличено с 100k до 500k
-LEARNING_RATE = 1e-4         # Уменьшено с 3e-4 для стабильности
-N_STEPS = 4096              # Увеличено для лучшего обучения
-BATCH_SIZE = 128            # Увеличено
-N_EPOCHS = 8                # Оптимизировано
-ENT_COEF = 0.01             # Увеличено для лучшего exploration
-
-LOG_PATH = os.path.join(os.path.dirname(__file__), 'improved_analysis_log.csv')
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'ppo_improved_final.zip')
-
-class EarlyStoppingCallback(BaseCallback):
-    """Callback для early stopping при длинных сериях поражений"""
+def create_env(log_actions=True):
+    """Создает окружение с улучшенными наградами"""
+    def make_env():
+        env = NetworkEchoEnvImproved(
+            config={
+                'reduce_randomness': True,  # Уменьшаем случайность
+                'enemy_spawn_rate': 0.1,   # Уменьшаем спавн врагов
+                'resource_spawn_rate': 0.2  # Увеличиваем ресурсы
+            },
+            log_actions=log_actions,
+            log_path="improved_training_log.jsonl",
+            max_log_entries=5000
+        )
+        return Monitor(env)
     
-    def __init__(self, patience=100, min_episodes=200, verbose=1):
-        super().__init__(verbose)
-        self.patience = patience
-        self.min_episodes = min_episodes
-        self.loss_streak = 0
-        self.best_reward = -np.inf
-        self.no_improvement_count = 0
-        self.episode_count = 0
-        
-    def _on_step(self) -> bool:
-        self.episode_count += 1
-        
-        # Получаем информацию о последних эпизодах
-        if hasattr(self.training_env, 'get_attr'):
-            try:
-                recent_rewards = []
-                for env in self.training_env.envs:
-                    if hasattr(env, 'episode_rewards'):
-                        recent_rewards.extend(env.episode_rewards[-10:])
-                
-                if recent_rewards:
-                    avg_reward = np.mean(recent_rewards)
-                    
-                    # Проверяем улучшение
-                    if avg_reward > self.best_reward:
-                        self.best_reward = avg_reward
-                        self.no_improvement_count = 0
-                    else:
-                        self.no_improvement_count += 1
-                    
-                    # Early stopping только после минимального количества эпизодов
-                    if (self.episode_count >= self.min_episodes and 
-                        self.no_improvement_count >= self.patience):
-                        if self.verbose > 0:
-                            print(f"Early stopping triggered after {self.patience} episodes without improvement")
-                        return False
-            except:
-                pass
-        
-        return True
+    return DummyVecEnv([make_env])
 
-class AdaptiveLearningRateCallback(BaseCallback):
-    """Callback для адаптивного learning rate"""
-    
-    def __init__(self, initial_lr=1e-4, min_lr=1e-6, factor=0.8, patience=50, verbose=1):
-        super().__init__(verbose)
-        self.initial_lr = initial_lr
-        self.min_lr = min_lr
-        self.factor = factor
-        self.patience = patience
-        self.best_reward = -np.inf
-        self.no_improvement_count = 0
-        self.current_lr = initial_lr
-        
-    def _on_step(self) -> bool:
-        try:
-            # Получаем среднюю награду за последние эпизоды
-            recent_rewards = []
-            for env in self.training_env.envs:
-                if hasattr(env, 'episode_rewards'):
-                    recent_rewards.extend(env.episode_rewards[-20:])
-            
-            if recent_rewards:
-                avg_reward = np.mean(recent_rewards)
-                
-                if avg_reward > self.best_reward:
-                    self.best_reward = avg_reward
-                    self.no_improvement_count = 0
-                else:
-                    self.no_improvement_count += 1
-                
-                # Адаптивное изменение learning rate
-                if self.no_improvement_count >= self.patience:
-                    self.current_lr = max(self.current_lr * self.factor, self.min_lr)
-                    self.model.learning_rate = self.current_lr
-                    self.no_improvement_count = 0
-                    
-                    if self.verbose > 0:
-                        print(f"Learning rate reduced to {self.current_lr:.2e}")
-        except:
-            pass
-        
-        return True
-
-class RewardShapingCallback(BaseCallback):
-    """Callback для улучшенного reward shaping"""
-    
-    def __init__(self, verbose=1):
-        super().__init__(verbose)
-        self.resource_bonus = 0.1
-        self.efficiency_bonus = 0.2
-        self.exploration_bonus = 0.05
-        
-    def _on_step(self) -> bool:
-        # Этот callback будет интегрирован в окружение
-        return True
-
-class CurriculumLearningCallback(BaseCallback):
-    """Callback для curriculum learning"""
-    
-    def __init__(self, stage_thresholds=[0.15, 0.25, 0.35], verbose=1):
-        super().__init__(verbose)
-        self.stage_thresholds = stage_thresholds
-        self.current_stage = 0
-        self.stage_episodes = 0
-        
-    def _on_step(self) -> bool:
-        self.stage_episodes += 1
-        
-        # Проверяем прогресс для перехода на следующий этап
-        try:
-            recent_rewards = []
-            for env in self.training_env.envs:
-                if hasattr(env, 'episode_rewards'):
-                    recent_rewards.extend(env.episode_rewards[-100:])
-            
-            if len(recent_rewards) > 100:  # Минимум эпизодов для оценки
-                win_rate = np.mean([1 if r > 0 else 0 for r in recent_rewards[-100:]])
-                
-                if (self.current_stage < len(self.stage_thresholds) and 
-                    win_rate >= self.stage_thresholds[self.current_stage]):
-                    self.current_stage += 1
-                    if self.verbose > 0:
-                        print(f"Progressing to stage {self.current_stage} (win rate: {win_rate:.2f})")
-        except:
-            pass
-        
-        return True
-
-# Улучшенный CSV логгер
-def log_episode_improved(session_id, stage, win, reason, score, steps, trace, final_stats=None):
-    file_exists = os.path.isfile(LOG_PATH)
-    with open(LOG_PATH, 'a', newline='') as csvfile:
-        writer = csv.writer(csvfile)
-        if not file_exists:
-            writer.writerow([
-                'session_id', 'stage', 'win', 'reason_for_end', 'final_score', 'total_steps', 'final_trace_level',
-                'program_counts', 'avg_levels', 'enemies_killed', 'total_dp', 'total_cpu', 'timestamp'
-            ])
-        row = [session_id, stage, win, reason, score, steps, trace]
-        if final_stats:
-            row.append(str(final_stats.get('program_counts', {})))
-            row.append(str(final_stats.get('avg_levels', {})))
-            row.append(final_stats.get('enemies_killed', 0))
-            row.append(final_stats.get('total_dp', 0))
-            row.append(final_stats.get('total_cpu', 0))
-        else:
-            row += ['', '', '', '', '']
-        row.append(datetime.now().isoformat())
-        writer.writerow(row)
-
-def create_improved_env(stage=0, mode='full'):
-    """Создает улучшенное окружение с настройками для стабильности"""
-    
-    config = {
-        'mode': mode,
-        'stage': stage,
-        'reduce_randomness': True,  # Уменьшаем случайность
-        'improved_rewards': True,   # Включаем улучшенные награды
-        'curriculum_learning': True # Включаем curriculum learning
-    }
-    
-    env = NetworkEchoEnvImproved(config=config)
-    return env
-
-def train_stage(stage_name, stage_config, model=None):
-    """Обучение одного этапа с улучшенными параметрами"""
-    
-    print(f"\n🎯 Этап: {stage_name}")
+def train_improved_model(total_timesteps=1000000, save_interval=50000):
+    print("[DEBUG] Вход в train_improved_model")
+    print(f"[DEBUG] total_timesteps={total_timesteps}, save_interval={save_interval}")
+    print("🚀 ЗАПУСК УЛУЧШЕННОГО ОБУЧЕНИЯ")
     print("=" * 50)
     
     # Создаем окружение
-    env = create_improved_env(stage_config['stage'], stage_config['mode'])
-    env = DummyVecEnv([lambda: env])
-    env = VecMonitor(env, LOG_PATH)
+    print("[DEBUG] Создание окружения...")
+    env = create_env(log_actions=True)
+    print("[DEBUG] Окружение создано")
+    print(f"[DEBUG] env.action_space: {env.action_space}")
+    print(f"[DEBUG] env.observation_space: {env.observation_space}")
     
-    # Создаем или загружаем модель с улучшенными параметрами
-    if model is None:
+    # Создаем модель
+    print("[DEBUG] Создание модели...")
+    try:
         model = PPO(
             "MlpPolicy",
             env,
-            learning_rate=LEARNING_RATE,
-            n_steps=N_STEPS,
-            batch_size=BATCH_SIZE,
-            n_epochs=N_EPOCHS,
+            learning_rate=3e-4,
+            n_steps=2048,
+            batch_size=64,
+            n_epochs=4,
             gamma=0.99,
             gae_lambda=0.95,
             clip_range=0.2,
             clip_range_vf=None,
             normalize_advantage=True,
-            ent_coef=ENT_COEF,  # Увеличено для лучшего exploration
+            ent_coef=0.01,
             vf_coef=0.5,
             max_grad_norm=0.5,
-            use_sde=False,  # Отключаем для дискретных действий
             target_kl=None,
-            tensorboard_log="./tensorboard_logs/",
-            verbose=1
+            tensorboard_log="./tensorboard_logs_improved/",
+            verbose=0
         )
-    else:
-        model.set_env(env)
-    
-    # Callbacks
-    callbacks = [
-        EarlyStoppingCallback(patience=100, verbose=1),
-        AdaptiveLearningRateCallback(initial_lr=LEARNING_RATE, verbose=1),
-        CurriculumLearningCallback(verbose=1),
-        CheckpointCallback(
-            save_freq=max(10000, EPISODES_PER_STAGE // 10),
-            save_path=f"./checkpoints/stage_{stage_config['stage']}/",
-            name_prefix="ppo_model"
-        )
-    ]
-    
-    # Обучение
-    try:
-        print(f"Начинаем обучение этапа {stage_name}...")
-        print(f"Параметры: episodes={EPISODES_PER_STAGE}, lr={LEARNING_RATE}, batch_size={BATCH_SIZE}")
-        
-        # Обучаем модель
-        model.learn(
-            total_timesteps=EPISODES_PER_STAGE * 1000,  # Примерное количество шагов
-            callback=callbacks,
-            progress_bar=False  # Отключаем progress bar для избежания ошибок
-        )
-        
-        # Сохраняем модель
-        model_path = f"ppo_improved_stage_{stage_config['stage']}.zip"
-        model.save(model_path)
-        print(f"✅ Модель сохранена: {model_path}")
-        
-        return model
-        
+        print("[DEBUG] Модель создана")
     except Exception as e:
-        print(f"❌ Ошибка при обучении этапа {stage_name}: {e}")
-        return model
+        print(f"[DEBUG] Ошибка при создании модели: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+    
+    # Создаем колбэки
+    print("[DEBUG] Создание колбэков...")
+    try:
+        checkpoint_callback = CheckpointCallback(
+            save_freq=save_interval,
+            save_path="./checkpoints_improved/",
+            name_prefix="PPO_improved"
+        )
+        print("[DEBUG] Колбэки созданы")
+    except Exception as e:
+        print(f"[DEBUG] Ошибка при создании колбэка: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+    
+    # Создаем папки для сохранения
+    os.makedirs("./checkpoints_improved/", exist_ok=True)
+    os.makedirs("./tensorboard_logs_improved/", exist_ok=True)
+    
+    print(f"📊 Параметры обучения:")
+    print(f"  🎯 Общее количество шагов: {total_timesteps:,}")
+    print(f"  💾 Интервал сохранения: {save_interval:,}")
+    print(f"  📈 Learning rate: 3e-4")
+    print(f"  🎮 Batch size: 64")
+    print(f"  🔄 N epochs: 4")
+    print()
+    
+    # Запускаем обучение
+    start_time = time.time()
+    print("[DEBUG] Запуск model.learn...")
+    try:
+        model.learn(
+            total_timesteps=total_timesteps,
+            callback=checkpoint_callback,
+            progress_bar=False
+        )
+        print("[DEBUG] Обучение завершено без исключений")
+        
+        # Сохраняем финальную модель
+        final_model_path = f"improved_final_model_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+        model.save(final_model_path)
+        print(f"✅ Финальная модель сохранена: {final_model_path}")
+        
+    except KeyboardInterrupt:
+        print("\n⚠️ Обучение прервано пользователем")
+        # Сохраняем модель при прерывании
+        interrupted_model_path = f"improved_interrupted_model_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+        model.save(interrupted_model_path)
+        print(f"💾 Модель сохранена при прерывании: {interrupted_model_path}")
+    
+    except Exception as e:
+        print(f"❌ Ошибка во время обучения: {e}")
+        import traceback
+        traceback.print_exc()
+        # Сохраняем модель при ошибке
+        error_model_path = f"improved_error_model_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+        model.save(error_model_path)
+        print(f"💾 Модель сохранена при ошибке: {error_model_path}")
+    
     finally:
         env.close()
+        training_time = time.time() - start_time
+        print(f"⏱️ Время обучения: {training_time:.1f} секунд")
+    print("[DEBUG] Выход из train_improved_model")
+    return model
+
+def analyze_improved_training():
+    """Анализирует результаты улучшенного обучения"""
+    print("📊 АНАЛИЗ УЛУЧШЕННОГО ОБУЧЕНИЯ")
+    print("=" * 40)
+    
+    # Ищем файлы логов
+    log_files = [f for f in os.listdir('.') if f.startswith('improved_log_') and f.endswith('.jsonl')]
+    
+    if not log_files:
+        print("❌ Не найдены файлы логов улучшенного обучения")
+        return
+    
+    # Анализируем последний файл
+    latest_log = max(log_files)
+    print(f"📁 Анализируем файл: {latest_log}")
+    
+    # Читаем и анализируем логи
+    episodes = []
+    actions = []
+    rewards = []
+    
+    with open(latest_log, 'r') as f:
+        for line in f:
+            try:
+                data = json.loads(line.strip())
+                if data.get('type') == 'action':
+                    actions.append(data['chosen_action']['action'])
+                    rewards.append(data.get('improved_reward', 0))
+                elif data.get('type') == 'episode_end':
+                    episodes.append({
+                        'episode': data['episode'],
+                        'total_steps': data['total_steps'],
+                        'total_reward': data['total_reward'],
+                        'final_score': data['final_score'],
+                        'win': data['win']
+                    })
+            except json.JSONDecodeError:
+                continue
+    
+    if not episodes:
+        print("❌ Не найдены данные эпизодов")
+        return
+    
+    # Статистика
+    print(f"📈 Статистика обучения:")
+    print(f"  🎮 Количество эпизодов: {len(episodes)}")
+    print(f"  ⚡ Количество действий: {len(actions)}")
+    print(f"  🎯 Средняя награда: {np.mean(rewards):.3f}")
+    print(f"  📊 Средняя длина эпизода: {np.mean([ep['total_steps'] for ep in episodes]):.1f}")
+    print(f"  🏆 Побед: {sum(1 for ep in episodes if ep['win'])}")
+    print()
+    
+    # Анализ действий
+    action_counts = {}
+    for action in actions:
+        action_counts[action] = action_counts.get(action, 0) + 1
+    
+    print("🎮 Распределение действий:")
+    total_actions = len(actions)
+    for action, count in sorted(action_counts.items(), key=lambda x: x[1], reverse=True):
+        percentage = (count / total_actions) * 100
+        print(f"  {action}: {count} ({percentage:.1f}%)")
+    
+    # Создаем визуализацию
+    create_improved_visualization(episodes, actions, rewards)
+
+def create_improved_visualization(episodes, actions, rewards):
+    """Создает визуализацию результатов улучшенного обучения"""
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+    
+    # График наград по эпизодам
+    episode_rewards = [ep['total_reward'] for ep in episodes]
+    episode_numbers = [ep['episode'] for ep in episodes]
+    
+    ax1.plot(episode_numbers, episode_rewards, 'b-o', linewidth=2, markersize=6)
+    ax1.set_title('Награды по эпизодам (улучшенные)', fontsize=14, fontweight='bold')
+    ax1.set_xlabel('Эпизод')
+    ax1.set_ylabel('Общая награда')
+    ax1.grid(True, alpha=0.3)
+    
+    # График длины эпизодов
+    episode_lengths = [ep['total_steps'] for ep in episodes]
+    ax2.plot(episode_numbers, episode_lengths, 'g-o', linewidth=2, markersize=6)
+    ax2.set_title('Длина эпизодов', fontsize=14, fontweight='bold')
+    ax2.set_xlabel('Эпизод')
+    ax2.set_ylabel('Количество шагов')
+    ax2.grid(True, alpha=0.3)
+    
+    # Распределение действий
+    action_counts = {}
+    for action in actions:
+        action_counts[action] = action_counts.get(action, 0) + 1
+    
+    action_names = list(action_counts.keys())
+    action_values = list(action_counts.values())
+    colors = plt.cm.Set3(np.linspace(0, 1, len(action_names)))
+    
+    ax3.pie(action_values, labels=action_names, autopct='%1.1f%%', 
+             colors=colors, startangle=90)
+    ax3.set_title('Распределение действий', fontsize=14, fontweight='bold')
+    
+    # Гистограмма наград
+    ax4.hist(rewards, bins=50, alpha=0.7, color='orange', edgecolor='black')
+    ax4.set_title('Распределение наград', fontsize=14, fontweight='bold')
+    ax4.set_xlabel('Награда')
+    ax4.set_ylabel('Частота')
+    ax4.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig('improved_training_analysis.png', dpi=300, bbox_inches='tight')
+    print("📊 Визуализация сохранена: improved_training_analysis.png")
+    plt.show()
 
 def main():
-    """Основная функция обучения"""
+    """Главная функция"""
+    print("🤖 УЛУЧШЕННАЯ СИСТЕМА ОБУЧЕНИЯ")
+    print("=" * 50)
+    print("1. Запустить обучение")
+    print("2. Анализировать результаты")
+    print("3. Выход")
     
-    print("🚀 Запуск улучшенного RL-обучения")
-    print("=" * 60)
-    print(f"Улучшенные параметры:")
-    print(f"  - Эпизодов на этап: {EPISODES_PER_STAGE:,}")
-    print(f"  - Learning rate: {LEARNING_RATE}")
-    print(f"  - Batch size: {BATCH_SIZE}")
-    print(f"  - N steps: {N_STEPS}")
-    print(f"  - Entropy coefficient: {ENT_COEF}")
-    print("=" * 60)
-    
-    # Создаем папку для чекпоинтов
-    os.makedirs("./checkpoints", exist_ok=True)
-    
-    # Этапы обучения с улучшенными параметрами
-    stages = [
-        {
-            "name": "Экономика (упрощенная)",
-            "stage": 0,
-            "mode": "economy_tutorial",
-            "episodes": EPISODES_PER_STAGE
-        },
-        {
-            "name": "Оборона",
-            "stage": 1,
-            "mode": "defense_tutorial", 
-            "episodes": EPISODES_PER_STAGE
-        },
-        {
-            "name": "Полная игра",
-            "stage": 2,
-            "mode": "full",
-            "episodes": EPISODES_PER_STAGE
-        }
-    ]
-    
-    model = None
-    
-    for stage_idx, stage_config in enumerate(stages):
-        print(f"\n🎯 Этап {stage_idx + 1}/{len(stages)}: {stage_config['name']}")
+    try:
+        choice_input = input("\nВыберите действие (1-3): ").strip()
+        if not choice_input:
+            print("❌ Неверный ввод")
+            return
+        choice = int(choice_input)
         
-        # Обучаем этап
-        model = train_stage(stage_config['name'], stage_config, model)
-        
-        if model is None:
-            print(f"❌ Ошибка на этапе {stage_idx + 1}, прерываем обучение")
-            break
-    
-    # Сохраняем финальную модель
-    if model is not None:
-        model.save(MODEL_PATH)
-        print(f"\n✅ Финальная модель сохранена: {MODEL_PATH}")
-    
-    print(f"\n🎉 Улучшенное обучение завершено!")
-    print(f"📊 Результаты сохранены в: {LOG_PATH}")
-    print(f"🤖 Модель сохранена в: {MODEL_PATH}")
+        if choice == 1:
+            # Параметры обучения
+            total_steps_input = input("Введите количество шагов (по умолчанию 1,000,000): ").strip()
+            total_steps = int(total_steps_input) if total_steps_input else 1000000
+            
+            save_interval_input = input("Введите интервал сохранения (по умолчанию 50,000): ").strip()
+            save_interval = int(save_interval_input) if save_interval_input else 50000
+            
+            print(f"\n🚀 Запуск обучения на {total_steps:,} шагов...")
+            model = train_improved_model(total_steps, save_interval)
+            
+        elif choice == 2:
+            analyze_improved_training()
+            
+        elif choice == 3:
+            print("👋 До свидания!")
+            
+        else:
+            print("❌ Неверный выбор")
+            
+    except ValueError:
+        print("❌ Неверный ввод")
+    except KeyboardInterrupt:
+        print("\n👋 Программа прервана пользователем")
 
 if __name__ == "__main__":
     main() 

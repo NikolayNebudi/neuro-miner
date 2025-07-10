@@ -63,7 +63,7 @@ def log_episode_quick(session_id, stage, win, reason, score, steps, trace, final
         writer.writerow(row)
 
 def create_test_env(stage=0, mode='full'):
-    """Создает тестовое окружение"""
+    """Создает тестовое окружение с логированием"""
     config = {
         'mode': mode,
         'stage': stage,
@@ -71,8 +71,7 @@ def create_test_env(stage=0, mode='full'):
         'improved_rewards': True,
         'curriculum_learning': True
     }
-    
-    env = NetworkEchoEnvImproved(config=config)
+    env = NetworkEchoEnvImproved(config=config, log_actions=True, log_path="actions_log.jsonl")
     return env
 
 def train_stage_quick(stage_name, stage_config, model=None):
