@@ -473,10 +473,14 @@ canvas.addEventListener('click', function(e) {
                 const node = gameState.nodes[gameState.selectedNodeId];
                 if (node && node.program) {
                     let baseCost = node.program.type === 'miner' ? 13 : node.program.type === 'anti_exe' ? 20 : 27; // Уменьшено в 1.5 раза
-                    let cost = baseCost * node.program.level;
+                    // Прогрессивная стоимость: множитель увеличивается с уровнем
+                    let levelMultiplier = node.program.level <= 3 ? node.program.level : 
+                                        node.program.level <= 5 ? node.program.level * 1.5 : 
+                                        node.program.level * 2; // Для уровня 6+ двойная стоимость
+                    let cost = baseCost * levelMultiplier;
                     let cpuCost = 5 * node.program.level;
-                    // За один уровень hub можно апгрейдить два раза
-                    if (gameState.dp >= cost && gameState.cpu >= cpuCost && node.program.level < gameState.hubLevel * 2) {
+                    // За один уровень hub можно апгрейдить два раза, но максимальный уровень 6
+                    if (gameState.dp >= cost && gameState.cpu >= cpuCost && node.program.level < Math.min(6, gameState.hubLevel * 2)) {
                         gameState.dp -= cost;
                         gameState.cpu -= cpuCost;
                         node.program.level++;
@@ -490,7 +494,7 @@ canvas.addEventListener('click', function(e) {
                 const node = gameState.nodes[gameState.selectedNodeId];
                 if (node && node.type === 'hub') {
                     // --- Стоимость апгрейда HUB: ручной UX-тест ---
-                    let cost = 30 * gameState.hubLevel; // Было: 50 * hubLevel. Для RL-анализа заменить формулу на RL-оптимальную.
+                    let cost = 35 * gameState.hubLevel; // Уменьшено с 45 до 35
                     if (gameState.cpu >= cost) {
                         gameState.cpu -= cost;
                         gameState.hubLevel++;
@@ -901,8 +905,8 @@ function calculateProgramUIButtons(selectedNode) {
     if (selectedNode.program) {
         const x = selectedNode.x + offsetX;
         const y = selectedNode.y - btnH/2 + offsetY;
-        // --- Ограничение: апгрейд только если hubLevel * 2 >= целевого уровня ---
-        if (selectedNode.program.level < gameState.hubLevel * 2) {
+        // --- Ограничение: апгрейд только если hubLevel * 2 >= целевого уровня, но максимальный уровень 6 ---
+        if (selectedNode.program.level < Math.min(6, gameState.hubLevel * 2)) {
             buttons['upgrade'] = { x, y, w: btnW, h: btnH, type: 'upgrade'};
         }
     } else {
@@ -911,7 +915,13 @@ function calculateProgramUIButtons(selectedNode) {
             buttonData.push({ label: 'Overclocker', cost: 50, type: 'overclocker' });
         } else {
             buttonData.push({ label: 'Miner', cost: 13, type: 'miner' });
-            buttonData.push({ label: 'ANTI.EXE', cost: 20, type: 'anti_exe' });
+            
+            // Ограничение на количество ANTI.EXE (максимум 3)
+            const antiExeCount = Object.values(gameState.nodes).filter(n => n.owner === 'player' && n.program && n.program.type === 'anti_exe').length;
+            if (antiExeCount < 3) {
+                buttonData.push({ label: 'ANTI.EXE', cost: 20, type: 'anti_exe' });
+            }
+            
             buttonData.push({ label: 'Sentry', cost: 27, type: 'sentry' });
         }
         const totalHeight = buttonData.length * (btnH2 + spacing) - spacing;
@@ -940,12 +950,16 @@ function drawProgramUI(ctx, selectedNode) {
         if (btn.type === 'upgrade') {
             let prog = selectedNode.program;
             let baseCost = prog.type === 'miner' ? 13 : prog.type === 'anti_exe' ? 20 : 27;
-            let cost = Math.round(baseCost * 1.5 * prog.level);
+            // Прогрессивная стоимость для отображения
+            let levelMultiplier = prog.level <= 3 ? prog.level : 
+                                prog.level <= 5 ? prog.level * 1.5 : 
+                                prog.level * 2;
+            let cost = Math.round(baseCost * levelMultiplier);
             let cpuCost = 10 * prog.level;
             label = `Upgrade Lvl ${prog.level+1}\n(${cost}DP, ${cpuCost}CPU)`;
         } else if (btn.type === 'upgrade_hub') {
             // --- Отображение стоимости апгрейда HUB ---
-            let cost = 30 * gameState.hubLevel; // Было: 50 * hubLevel. Для RL-анализа заменить формулу на RL-оптимальную.
+            let cost = 35 * gameState.hubLevel; // Уменьшено с 45 до 35
             label = `Upgrade HUB\n(${cost} CPU)`;
         } else {
             let btnLabel = btn.label || '';
@@ -1216,7 +1230,7 @@ function update(dt, now) {
                         if (dist < minDist) { minDist = dist; nearestEnemy = enemy; }
                     }
                     if (nearestEnemy) {
-                        let baseDmg = 10 * Math.pow(2, node.program.level - 1); // Урон увеличен на 5 и удваивается с уровнем
+                        let baseDmg = 15 * Math.pow(2, node.program.level - 1); // Урон увеличен с 10 до 15 и удваивается с уровнем
                         // Бонус от hub level: +5% за каждый уровень
                         let hubBonus = 1 + (gameState.hubLevel - 1) * 0.05;
                         baseDmg *= hubBonus;
@@ -1243,8 +1257,8 @@ function update(dt, now) {
                     let delaySteps = 3 + (gameState.hubLevel - 1);
                     enemy.isStunnedUntil = performance.now() + (delaySteps * 1000);
                     
-                    // Наносим периодический урон 5 за каждый ход
-                    enemy.health -= 5;
+                    // Наносим периодический урон 10 за каждый ход (уменьшено с 15)
+                    enemy.health -= 10;
                     
                     // Ослабляем броню врагов (уменьшаем сопротивление)
                     if (enemy.armor === undefined) enemy.armor = 1;
@@ -1422,7 +1436,7 @@ function update(dt, now) {
             // Замедляем рост trace level на 5%
             gameState.traceLevel *= 0.95;
         }
-        gameState.dp += 15 * killedEnemies.length;
+        gameState.dp += 8 * killedEnemies.length; // Уменьшено с 15 до 8
         for(const enemy of killedEnemies) {
             const node = gameState.nodes[enemy.currentNodeId];
             if (node) visualEffects.enemyExplosions.push({x:node.x, y:node.y, time: now});
