@@ -451,7 +451,10 @@ function updateGame(deltaTime) {
                         if (dist < minDist) { minDist = dist; nearestEnemy = enemy; }
                     }
                     if (nearestEnemy) {
-                        let baseDmg = 5 * Math.pow(2, node.program.level - 1); // Урон удваивается с уровнем
+                        let baseDmg = 10 * Math.pow(2, node.program.level - 1); // Урон увеличен на 5 и удваивается с уровнем
+                        // Бонус от hub level: +5% за каждый уровень
+                        let hubBonus = 1 + (gameState.hubLevel - 1) * 0.05;
+                        baseDmg *= hubBonus;
                         nearestEnemy.health -= baseDmg;
                         node.program.cooldown = Date.now() + (1000 / node.program.level);
                     }
@@ -464,12 +467,21 @@ function updateGame(deltaTime) {
     gameState.lastMinerTick += deltaTime / 1000;
     if (gameState.lastMinerTick > 1) {
         let dpIncome = 0, cpuIncome = 0;
-        if(gameState.nodes['hub'] && gameState.nodes['hub'].owner === 'player') dpIncome += 2; // Базовый доход от HUB
+        // Hub пассивно генерирует CPU: 2 + 2 за каждый уровень
+        if(gameState.nodes['hub'] && gameState.nodes['hub'].owner === 'player') {
+            dpIncome += 2; // Базовый доход от HUB
+            cpuIncome += 2 + (gameState.hubLevel - 1) * 2; // Пассивная генерация CPU
+        }
         for (const id in gameState.nodes) {
             const node = gameState.nodes[id];
             if (node.owner === 'player' && node.program) {
                 const level = node.program.level;
-                if (node.program.type === 'miner') dpIncome += 3 * Math.pow(1.8, level - 1);
+                if (node.program.type === 'miner') {
+                    // Бонус от hub level: +5% за каждый уровень
+                    let baseIncome = 3 * Math.pow(1.8, level - 1);
+                    let hubBonus = 1 + (gameState.hubLevel - 1) * 0.05;
+                    dpIncome += baseIncome * hubBonus;
+                }
                 if (node.program.type === 'overclocker') cpuIncome += 1 * level;
             }
         }
@@ -482,7 +494,25 @@ function updateGame(deltaTime) {
     gameState.lastEnemySpawn += deltaTime / 1000;
     const spawnInterval = gameState.hubCaptureActive ? 2 : Math.max(1.5, (10 - (gameState.traceLevel * 0.02)) ); // секунды
     if (gameState.lastEnemySpawn > spawnInterval) {
-        const spawnableNodes = Object.values(gameState.nodes).filter(n => n.owner !== 'player' && n.type !== 'hub');
+        // Враги не могут появляться на нодах игрока и минимум через одну ноду от нод игрока
+        const playerNodes = Object.values(gameState.nodes).filter(n => n.owner === 'player');
+        const playerNodeIds = new Set(playerNodes.map(n => n.id));
+        const playerNeighborIds = new Set();
+        
+        // Добавляем соседей нод игрока
+        for (const playerNode of playerNodes) {
+            for (const neighborId of playerNode.neighbors) {
+                playerNeighborIds.add(neighborId);
+            }
+        }
+        
+        const spawnableNodes = Object.values(gameState.nodes).filter(n => 
+            n.owner !== 'player' && 
+            n.type !== 'hub' && 
+            !playerNodeIds.has(n.id) && 
+            !playerNeighborIds.has(n.id)
+        );
+        
         if (spawnableNodes.length > 0) {
             const startNode = spawnableNodes[Math.floor(Math.random() * spawnableNodes.length)];
             let enemyType = (gameState.traceLevel > 50 || gameState.hubCaptureActive) ? 'hunter' : 'patrol';
@@ -504,7 +534,7 @@ function updateGame(deltaTime) {
             
             const enemy = new Enemy('e' + gameState.enemyIdCounter++, startNode.id, path, enemyType);
             enemy.lastMove = 0; // таймер движения
-                gameState.enemies.push(enemy);
+            gameState.enemies.push(enemy);
         }
         gameState.lastEnemySpawn = 0;
     }
@@ -535,15 +565,12 @@ function updateGame(deltaTime) {
         const node = gameState.nodes[enemy.currentNodeId];
         if (node && node.owner === 'player') {
             let damage = 30 * deltaTime / 1000;
-            if (node.program?.type === 'shield' && node.shieldHealth > 0) {
-                node.shieldHealth -= damage;
-            } else if (node.program?.type !== 'sentry') {
+            if (node.program?.type !== 'sentry') {
                 node.captureProgress -= 0.3 * deltaTime / 1000;
                 if (node.captureProgress <= 0) {
                     node.owner = 'neutral'; 
                     node.program = null; 
-                    node.captureProgress = 0; 
-                    node.shieldHealth = 0;
+                    node.captureProgress = 0;
                 }
             }
         }
@@ -583,11 +610,14 @@ function updateGame(deltaTime) {
     }
     
     // --- Очистка и таймеры ---
-            const killedEnemies = gameState.enemies.filter(e => e.health <= 0);
-        if(killedEnemies.length > 0) {
-            gameState.traceLevel = Math.max(0, gameState.traceLevel - 2 * killedEnemies.length); // Снижаем trace level за убийство врагов
-            gameState.dp += 15 * killedEnemies.length;
-        }
+    const killedEnemies = gameState.enemies.filter(e => e.health <= 0);
+    if(killedEnemies.length > 0) {
+        // Убийство врагов замедляет trace level на 5% и уменьшает текущий trace level на 50
+        gameState.traceLevel = Math.max(0, gameState.traceLevel - 50);
+        // Замедляем рост trace level на 5%
+        gameState.traceLevel *= 0.95;
+        gameState.dp += 15 * killedEnemies.length;
+    }
     gameState.enemies = gameState.enemies.filter(e => e.health > 0);
     
     if (gameState.empCooldown > 0) gameState.empCooldown -= deltaTime;
@@ -616,8 +646,8 @@ function performAction(action) {
         case 'build_sentry':
             result = buildProgram('sentry', targetNodeId) ? { success: true } : { success: false, reason: 'Не удалось построить sentry' };
             break;
-        case 'build_shield':
-            result = buildProgram('shield', targetNodeId) ? { success: true } : { success: false, reason: 'Не удалось построить shield' };
+        case 'build_anti_exe':
+            result = buildProgram('anti_exe', targetNodeId) ? { success: true } : { success: false, reason: 'Не удалось построить anti_exe' };
             break;
         case 'build_overclocker':
             result = buildProgram('overclocker', targetNodeId) ? { success: true } : { success: false, reason: 'Не удалось построить overclocker' };
@@ -650,11 +680,11 @@ function buildProgram(programType, nodeId) {
     const node = gameState.nodes[nodeId];
     if (!node || node.owner !== 'player') return false;
 
-    // Точные стоимости из основного движка
+    // Точные стоимости из основного движка (уменьшены в 1.5 раза)
     const costs = {
-        'miner': 20,
-        'sentry': 40,
-        'shield': 30,
+        'miner': 13,
+        'sentry': 27,
+        'anti_exe': 20,
         'overclocker': 50
     };
 
@@ -673,12 +703,13 @@ function upgradeProgram(nodeId) {
     const node = gameState.nodes[nodeId];
     if (!node || !node.program) return false;
 
-    // Точная логика апгрейда из основного движка
-    let baseCost = node.program.type === 'miner' ? 20 : node.program.type === 'shield' ? 30 : 40;
+    // Точная логика апгрейда из основного движка (уменьшены в 1.5 раза)
+    let baseCost = node.program.type === 'miner' ? 13 : node.program.type === 'anti_exe' ? 20 : 27;
     let cost = baseCost * node.program.level;
     let cpuCost = 5 * node.program.level;
     
-    if (gameState.dp < cost || gameState.cpu < cpuCost || node.program.level >= gameState.hubLevel) return false;
+    // За один уровень hub можно апгрейдить два раза
+    if (gameState.dp < cost || gameState.cpu < cpuCost || node.program.level >= gameState.hubLevel * 2) return false;
 
     gameState.dp -= cost;
     gameState.cpu -= cpuCost;
@@ -852,14 +883,14 @@ function getPossibleActions() {
         const node = gameState.nodes[nodeId];
         if (node.owner === 'player' && !node.program) {
             // Проверяем условия для каждой программы
-            if (gameState.dp >= 20) {
+            if (gameState.dp >= 13) {
                 actions.push({action: 'build_miner', targetNodeId: nodeId});
             }
-            if (gameState.dp >= 40) {
+            if (gameState.dp >= 27) {
                 actions.push({action: 'build_sentry', targetNodeId: nodeId});
             }
-            if (gameState.dp >= 30) {
-                actions.push({action: 'build_shield', targetNodeId: nodeId});
+            if (gameState.dp >= 20) {
+                actions.push({action: 'build_anti_exe', targetNodeId: nodeId});
             }
             if (node.type === 'cpu_node' && gameState.dp >= 50) {
                 actions.push({action: 'build_overclocker', targetNodeId: nodeId});
@@ -872,12 +903,12 @@ function getPossibleActions() {
         const node = gameState.nodes[nodeId];
         if (node.owner === 'player' && node.program) {
             // Проверяем, можно ли реально апгрейдить программу
-            let baseCost = node.program.type === 'miner' ? 20 : node.program.type === 'shield' ? 30 : 40;
+            let baseCost = node.program.type === 'miner' ? 13 : node.program.type === 'anti_exe' ? 20 : 27;
             let cost = baseCost * node.program.level;
             let cpuCost = 5 * node.program.level;
             
-            // Проверяем все условия для апгрейда
-            if (gameState.dp >= cost && gameState.cpu >= cpuCost && node.program.level < gameState.hubLevel) {
+            // Проверяем все условия для апгрейда (за один уровень hub можно апгрейдить два раза)
+            if (gameState.dp >= cost && gameState.cpu >= cpuCost && node.program.level < gameState.hubLevel * 2) {
                 actions.push({action: 'upgrade', targetNodeId: nodeId});
             }
         }

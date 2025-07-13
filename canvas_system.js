@@ -472,10 +472,11 @@ canvas.addEventListener('click', function(e) {
             if (key === 'upgrade' && gameState.selectedNodeId) {
                 const node = gameState.nodes[gameState.selectedNodeId];
                 if (node && node.program) {
-                    let baseCost = node.program.type === 'miner' ? 20 : node.program.type === 'shield' ? 30 : 40;
+                    let baseCost = node.program.type === 'miner' ? 13 : node.program.type === 'anti_exe' ? 20 : 27; // Уменьшено в 1.5 раза
                     let cost = baseCost * node.program.level;
                     let cpuCost = 5 * node.program.level;
-                    if (gameState.dp >= cost && gameState.cpu >= cpuCost && node.program.level < gameState.hubLevel) {
+                    // За один уровень hub можно апгрейдить два раза
+                    if (gameState.dp >= cost && gameState.cpu >= cpuCost && node.program.level < gameState.hubLevel * 2) {
                         gameState.dp -= cost;
                         gameState.cpu -= cpuCost;
                         node.program.level++;
@@ -499,10 +500,10 @@ canvas.addEventListener('click', function(e) {
                     }
                 }
             }
-            if ((key === 'miner' || key === 'shield' || key === 'sentry') && gameState.selectedNodeId) {
+            if ((key === 'miner' || key === 'anti_exe' || key === 'sentry') && gameState.selectedNodeId) {
                 const node = gameState.nodes[gameState.selectedNodeId];
                 if (node && !node.program && node.owner === 'player') {
-                    let cost = key === 'miner' ? 20 : key === 'shield' ? 30 : 40;
+                    let cost = key === 'miner' ? 13 : key === 'anti_exe' ? 20 : 27; // Уменьшено в 1.5 раза
                     if (gameState.dp >= cost) {
                         gameState.dp -= cost;
                         node.program = { type: key, level: 1 };
@@ -664,22 +665,17 @@ function drawProgramIcon(ctx, node) {
         ctx.fill();
         ctx.restore();
     }
-    if (node.program.type === 'shield') {
-        icon = 'S'; color = '#00eaff';
-        // Анимация: вращающийся глоу
+    if (node.program.type === 'anti_exe') {
+        icon = 'A'; color = '#ff1744';
+        // Анимация: пульсирующий красный глоу
         ctx.save();
-        ctx.globalAlpha = 0.22;
-        ctx.translate(node.x, node.y);
-        ctx.rotate(time);
-        for (let i = 0; i < 4; i++) {
-            ctx.beginPath();
-            ctx.arc(0, 0, 20, i * Math.PI/2, i * Math.PI/2 + Math.PI/4);
-            ctx.strokeStyle = '#00eaff';
-            ctx.lineWidth = 5;
-            ctx.shadowColor = '#00eaff';
-            ctx.shadowBlur = 12;
-            ctx.stroke();
-        }
+        ctx.globalAlpha = 0.25 + 0.15 * Math.sin(time * 4);
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, 24 + 6 * Math.sin(time * 3), 0, 2 * Math.PI);
+        ctx.fillStyle = '#ff1744';
+        ctx.shadowColor = '#ff1744';
+        ctx.shadowBlur = 20;
+        ctx.fill();
         ctx.restore();
     }
     if (node.program.type === 'sentry') {
@@ -782,23 +778,21 @@ function drawNode(ctx, node) {
                 ctx.restore();
             }
         }
-        if (node.program.type === 'shield') {
-            const shieldColors = ['#00eaff', '#33f6ff', '#b2faff'];
-            fill = shieldColors[Math.min(lvl-1, shieldColors.length-1)];
+        if (node.program.type === 'anti_exe') {
+            const antiExeColors = ['#ff1744', '#ff4569', '#ff8a9a'];
+            fill = antiExeColors[Math.min(lvl-1, antiExeColors.length-1)];
             shadow = fill;
-            stroke = '#e0f7fa';
-            // Вращающийся глоу и кольца
+            stroke = '#ffe0e0';
+            // Пульсирующий красный глоу и кольца
             for (let i = 0; i < lvl; i++) {
                 ctx.save();
-                ctx.globalAlpha = 0.18 + 0.08*i;
-                ctx.translate(node.x, node.y);
-                ctx.rotate(time * (1 + i*0.5));
+                ctx.globalAlpha = 0.2 + 0.1*i;
                 ctx.beginPath();
-                ctx.arc(0, 0, size + 10 + 7*i, 0, 2 * Math.PI);
-                ctx.strokeStyle = shieldColors[Math.min(i, shieldColors.length-1)];
-                ctx.lineWidth = 5 + 2*i;
-                ctx.shadowColor = shieldColors[Math.min(i, shieldColors.length-1)];
-                ctx.shadowBlur = 16 + 8*i;
+                ctx.arc(node.x, node.y, size + 12 + 8*i + 4*Math.sin(time*3 + i), 0, 2 * Math.PI);
+                ctx.strokeStyle = antiExeColors[Math.min(i, antiExeColors.length-1)];
+                ctx.lineWidth = 6 + 2*i;
+                ctx.shadowColor = antiExeColors[Math.min(i, antiExeColors.length-1)];
+                ctx.shadowBlur = 18 + 10*i;
                 ctx.stroke();
                 ctx.restore();
             }
@@ -870,12 +864,7 @@ function drawNode(ctx, node) {
         ctx.beginPath(); ctx.arc(node.x, node.y, size + 6, -Math.PI/2, -Math.PI/2 + 2 * Math.PI * node.captureProgress); ctx.stroke(); ctx.restore();
     }
     
-    if (node.owner === 'player' && node.program?.type === 'shield' && node.shieldHealth > 0) {
-        ctx.save(); ctx.lineWidth = 6.5; ctx.strokeStyle = '#00eaff';
-        let frac = node.shieldHealth / node.maxShieldHealth;
-        ctx.setLineDash([8, 7]); ctx.lineDashOffset = -time*10;
-        ctx.beginPath(); ctx.arc(node.x, node.y, size + 16, -Math.PI/2, -Math.PI/2 + 2 * Math.PI * frac); ctx.stroke(); ctx.restore();
-    }
+
 
     if (node.type === 'hub') { ctx.font = 'bold 18px sans-serif'; ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('HUB', node.x, node.y); }
     ctx.restore();
@@ -912,8 +901,8 @@ function calculateProgramUIButtons(selectedNode) {
     if (selectedNode.program) {
         const x = selectedNode.x + offsetX;
         const y = selectedNode.y - btnH/2 + offsetY;
-        // --- Ограничение: апгрейд только если hubLevel >= целевого уровня ---
-        if (selectedNode.program.level < gameState.hubLevel) {
+        // --- Ограничение: апгрейд только если hubLevel * 2 >= целевого уровня ---
+        if (selectedNode.program.level < gameState.hubLevel * 2) {
             buttons['upgrade'] = { x, y, w: btnW, h: btnH, type: 'upgrade'};
         }
     } else {
@@ -921,9 +910,9 @@ function calculateProgramUIButtons(selectedNode) {
         if (selectedNode.type === 'cpu_node') {
             buttonData.push({ label: 'Overclocker', cost: 50, type: 'overclocker' });
         } else {
-            buttonData.push({ label: 'Miner', cost: 20, type: 'miner' });
-            buttonData.push({ label: 'Shield', cost: 30, type: 'shield' });
-            buttonData.push({ label: 'Sentry', cost: 40, type: 'sentry' });
+            buttonData.push({ label: 'Miner', cost: 13, type: 'miner' });
+            buttonData.push({ label: 'ANTI.EXE', cost: 20, type: 'anti_exe' });
+            buttonData.push({ label: 'Sentry', cost: 27, type: 'sentry' });
         }
         const totalHeight = buttonData.length * (btnH2 + spacing) - spacing;
         const startY = selectedNode.y - totalHeight/2 + offsetY;
@@ -950,7 +939,7 @@ function drawProgramUI(ctx, selectedNode) {
         let label = '';
         if (btn.type === 'upgrade') {
             let prog = selectedNode.program;
-            let baseCost = prog.type === 'miner' ? 20 : prog.type === 'shield' ? 30 : 40;
+            let baseCost = prog.type === 'miner' ? 13 : prog.type === 'anti_exe' ? 20 : 27;
             let cost = Math.round(baseCost * 1.5 * prog.level);
             let cpuCost = 10 * prog.level;
             label = `Upgrade Lvl ${prog.level+1}\n(${cost}DP, ${cpuCost}CPU)`;
@@ -1055,17 +1044,22 @@ function render() {
     for (const shot of visualEffects.sentryShots) {
         const t = (performance.now() - shot.time) / 200;
         if (t > 1) continue;
-        // Неоново-зелёный лазер
+        
+        // Определяем цвет выстрела
+        let shotColor = shot.color || '#00ff90'; // По умолчанию зеленый для sentry
+        
+        // Неоновый лазер
         ctx.save();
         ctx.globalAlpha = 1 - t;
-        ctx.strokeStyle = '#00ff90'; // ярко-зелёный
-        ctx.shadowColor = '#00ff90';
+        ctx.strokeStyle = shotColor;
+        ctx.shadowColor = shotColor;
         ctx.shadowBlur = 22;
         ctx.lineWidth = 5 + 7 * (1 - t);
         ctx.beginPath();
         ctx.moveTo(shot.from.x, shot.from.y);
         ctx.lineTo(shot.to.x, shot.to.y);
         ctx.stroke();
+        
         // Брутальные бегущие волны
         const waveCount = 7;
         const dx = shot.to.x - shot.from.x;
@@ -1082,12 +1076,13 @@ function render() {
             ctx.beginPath();
             ctx.arc(0, 0, 6 + 3 * Math.sin(performance.now()/60 + i), 0, 2 * Math.PI);
             ctx.globalAlpha = 0.45 * (1 - t);
-            ctx.fillStyle = '#00ff90';
-            ctx.shadowColor = '#00ff90';
+            ctx.fillStyle = shotColor;
+            ctx.shadowColor = shotColor;
             ctx.shadowBlur = 16;
             ctx.fill();
             ctx.restore();
         }
+        
         // Внутренняя белая нить
         ctx.shadowBlur = 0;
         ctx.lineWidth = 2;
@@ -1208,13 +1203,7 @@ function update(dt, now) {
         // 2. Логика программ игрока
         if (node.owner === 'player' && node.program) {
             // Регенерация щита
-            if (node.program.type === 'shield') {
-                node.maxShieldHealth = 100 * Math.pow(1.5, node.program.level - 1);
-                if (node.shieldHealth < node.maxShieldHealth) {
-                    node.shieldHealth += (10 * node.program.level) * dt;
-                    if (node.shieldHealth > node.maxShieldHealth) node.shieldHealth = node.maxShieldHealth;
-                }
-            }
+            
             // Атака Sentry
             if (node.program.type === 'sentry') {
                 if (!node.program.cooldown || now > node.program.cooldown) {
@@ -1227,10 +1216,13 @@ function update(dt, now) {
                         if (dist < minDist) { minDist = dist; nearestEnemy = enemy; }
                     }
                     if (nearestEnemy) {
-                        let baseDmg = 5 * Math.pow(2, node.program.level - 1); // Урон удваивается с уровнем
+                        let baseDmg = 10 * Math.pow(2, node.program.level - 1); // Урон увеличен на 5 и удваивается с уровнем
+                        // Бонус от hub level: +5% за каждый уровень
+                        let hubBonus = 1 + (gameState.hubLevel - 1) * 0.05;
+                        baseDmg *= hubBonus;
                         const enemyNode = gameState.nodes[nearestEnemy.currentNodeId];
                         nearestEnemy.health -= baseDmg;
-                        visualEffects.sentryShots.push({ from: {x:node.x, y:node.y}, to: {x:enemyNode.x, y:enemyNode.y}, time: now });
+                        visualEffects.sentryShots.push({ from: {x:node.x, y:node.y}, to: {x:enemyNode.x, y:enemyNode.y}, time: now, color: '#00ff90' });
                         visualEffects.sentryFlashes.push({ x:enemyNode.x, y:enemyNode.y, time: now });
                         sound.play('sentry_shoot');
                         node.program.cooldown = now + (1000 / node.program.level);
@@ -1240,16 +1232,103 @@ function update(dt, now) {
         }
     }
 
+    // --- ANTI.EXE логика ---
+    for (const id in gameState.nodes) {
+        const node = gameState.nodes[id];
+        if (node.owner === 'player' && node.program && node.program.type === 'anti_exe') {
+            // Ищем врагов на этой ноде
+            for (const enemy of gameState.enemies) {
+                if (enemy.currentNodeId === id && !enemy.isStunnedUntil) {
+                    // Задерживаем врага на 3 шага + 1 за каждый уровень hub
+                    let delaySteps = 3 + (gameState.hubLevel - 1);
+                    enemy.isStunnedUntil = performance.now() + (delaySteps * 1000);
+                    
+                    // Наносим периодический урон 5 за каждый ход
+                    enemy.health -= 5;
+                    
+                    // Ослабляем броню врагов (уменьшаем сопротивление)
+                    if (enemy.armor === undefined) enemy.armor = 1;
+                    enemy.armor = Math.max(0.5, enemy.armor * 0.9);
+                    
+                    // ANTI.EXE исчезает после использования
+                    node.program = null;
+                    break;
+                }
+            }
+        }
+    }
+
+    // --- Miner с соседними Sentry ---
+    for (const id in gameState.nodes) {
+        const node = gameState.nodes[id];
+        if (node.owner === 'player' && node.program && node.program.type === 'miner') {
+            // Проверяем соседние ноды на наличие sentry
+            let sentryNeighbors = 0;
+            for (const neighborId of node.neighbors) {
+                const neighbor = gameState.nodes[neighborId];
+                if (neighbor && neighbor.owner === 'player' && neighbor.program && neighbor.program.type === 'sentry') {
+                    sentryNeighbors++;
+                }
+            }
+            
+            // Если есть две соседние sentry, miner получает способность sentry на 30%
+            if (sentryNeighbors >= 2) {
+                // Ищем ближайшего врага в радиусе
+                let sentryRange = 200;
+                let nearestEnemy = null, minDist = sentryRange;
+                
+                for (const enemy of gameState.enemies) {
+                    const enemyNode = gameState.nodes[enemy.currentNodeId];
+                    if (enemyNode) {
+                        const dist = getDistance(node.x, node.y, enemyNode.x, enemyNode.y);
+                        if (dist < minDist) {
+                            minDist = dist;
+                            nearestEnemy = enemy;
+                        }
+                    }
+                }
+                
+                if (nearestEnemy && (!node.program.lastSentryShot || performance.now() - node.program.lastSentryShot > 2000)) {
+                    let baseDmg = 10 * Math.pow(2, node.program.level - 1) * 0.3; // 30% от стандартного урона
+                    let hubBonus = 1 + (gameState.hubLevel - 1) * 0.05;
+                    baseDmg *= hubBonus;
+                    
+                    const enemyNode = gameState.nodes[nearestEnemy.currentNodeId];
+                    nearestEnemy.health -= baseDmg;
+                    
+                    // Визуальный эффект для miner-sentry
+                    visualEffects.sentryShots.push({ 
+                        from: {x:node.x, y:node.y}, 
+                        to: {x:enemyNode.x, y:enemyNode.y}, 
+                        time: performance.now(),
+                        color: '#ffd600' // Желтый цвет для miner-sentry
+                    });
+                    
+                    node.program.lastSentryShot = performance.now();
+                }
+            }
+        }
+    }
+
     // --- Ресурсы (раз в секунду) ---
     gameState.lastMinerTick += dt;
     if (gameState.lastMinerTick > 1) {
         let dpIncome = 0, cpuIncome = 0;
-        if(gameState.nodes['hub'] && gameState.nodes['hub'].owner === 'player') dpIncome += 2; // Базовый доход от HUB
+        // Hub пассивно генерирует CPU: 2 + 2 за каждый уровень
+        if(gameState.nodes['hub'] && gameState.nodes['hub'].owner === 'player') {
+            dpIncome += 2; // Базовый доход от HUB
+            cpuIncome += 2 + (gameState.hubLevel - 1) * 2; // Пассивная генерация CPU
+        }
         for (const id in gameState.nodes) {
             const node = gameState.nodes[id];
             if (node.owner === 'player' && node.program) {
                 const level = node.program.level;
-                if (node.program.type === 'miner') dpIncome += 3 * Math.pow(1.8, level - 1);
+                if (node.program.type === 'miner') {
+                    // Бонус от hub level: +5% за каждый уровень
+                    let baseIncome = 3 * Math.pow(1.8, level - 1);
+                    let hubBonus = 1 + (gameState.hubLevel - 1) * 0.05;
+                    dpIncome += baseIncome * hubBonus;
+                }
                 if (node.program.type === 'overclocker') cpuIncome += 1 * level;
             }
         }
@@ -1262,7 +1341,25 @@ function update(dt, now) {
     gameState.lastEnemySpawn += dt;
     const spawnInterval = gameState.hubCaptureActive ? 2 : Math.max(1.5, (10 - (gameState.traceLevel * 0.02)) ); // секунды
     if (gameState.lastEnemySpawn > spawnInterval) {
-        const spawnableNodes = Object.values(gameState.nodes).filter(n => n.owner !== 'player' && n.type !== 'hub');
+        // Враги не могут появляться на нодах игрока и минимум через одну ноду от нод игрока
+        const playerNodes = Object.values(gameState.nodes).filter(n => n.owner === 'player');
+        const playerNodeIds = new Set(playerNodes.map(n => n.id));
+        const playerNeighborIds = new Set();
+        
+        // Добавляем соседей нод игрока
+        for (const playerNode of playerNodes) {
+            for (const neighborId of playerNode.neighbors) {
+                playerNeighborIds.add(neighborId);
+            }
+        }
+        
+        const spawnableNodes = Object.values(gameState.nodes).filter(n => 
+            n.owner !== 'player' && 
+            n.type !== 'hub' && 
+            !playerNodeIds.has(n.id) && 
+            !playerNeighborIds.has(n.id)
+        );
+        
         if (spawnableNodes.length > 0) {
             const startNode = spawnableNodes[Math.floor(Math.random() * spawnableNodes.length)];
             let enemyType = (gameState.traceLevel > 50 || gameState.hubCaptureActive) ? 'hunter' : 'patrol';
@@ -1305,12 +1402,10 @@ function update(dt, now) {
         const node = gameState.nodes[enemy.currentNodeId];
         if (node && node.owner === 'player' && !godMode) {
             let damage = 30 * dt;
-            if (node.program?.type === 'shield' && node.shieldHealth > 0) {
-                node.shieldHealth -= damage;
-            } else if (node.program?.type !== 'sentry') {
+            if (node.program?.type !== 'sentry') {
                 node.captureProgress -= 0.3 * dt;
                 if (node.captureProgress <= 0) {
-                    node.owner = 'neutral'; node.program = null; node.captureProgress = 0; node.shieldHealth = 0;
+                    node.owner = 'neutral'; node.program = null; node.captureProgress = 0;
                     if(gameState.selectedNodeId === node.id) gameState.selectedNodeId = null;
                     triggerScreenShake(7, 250); sound.play('node_lost');
                 }
@@ -1321,7 +1416,12 @@ function update(dt, now) {
     // --- Очистка и таймеры ---
     const killedEnemies = gameState.enemies.filter(e => e.health <= 0);
     if(killedEnemies.length > 0) {
-        if (!godMode) gameState.traceLevel += 3 * killedEnemies.length;
+        // Убийство врагов замедляет trace level на 5% и уменьшает текущий trace level на 50
+        if (!godMode) {
+            gameState.traceLevel = Math.max(0, gameState.traceLevel - 50);
+            // Замедляем рост trace level на 5%
+            gameState.traceLevel *= 0.95;
+        }
         gameState.dp += 15 * killedEnemies.length;
         for(const enemy of killedEnemies) {
             const node = gameState.nodes[enemy.currentNodeId];
