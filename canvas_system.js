@@ -1,8 +1,8 @@
 // --- Константы потребления CPU программами ---
 const PROGRAM_CPU_USAGE = {
-    sentry: (level = 1) => 3 + (level - 1), // 3 базовое + 1 за каждый уровень
+    sentry: (level = 1) => 3 + (level - 1) * 2, // 3 базовое + 2 за каждый уровень
     anti_exe: (level = 1) => 8 + (level - 1) * 2, // 8 базовое + 2 за каждый уровень
-    miner: (level = 1) => level, // 1 CPU за каждый уровень
+    miner: (level = 1) => 2 * level, // 2 CPU за каждый уровень
     firewall: 5 // для будущего использования
 };
 
@@ -724,8 +724,20 @@ function angleBetweenEdges(ax, ay, bx, by, cx, cy) {
 function generateCanvasNetwork() {
     if (!canvas) return {};
     const width = canvas.width, height = canvas.height;
+    // --- Мертвая зона интерфейса (панель ресурсов) ---
+    const uiZone = { x: 0, y: 0, w: 300, h: 200 }; // чуть больше панели
     const nodes = [];
-    nodes.push(new Node(Math.random() * (width - 200) + 100, Math.random() * (height - 200) + 100, 'hub', 'hub'));
+    function isInUiZone(x, y) {
+        return x > uiZone.x && x < uiZone.x + uiZone.w && y > uiZone.y && y < uiZone.y + uiZone.h;
+    }
+    // --- HUB ---
+    let hubX, hubY, tries = 0;
+    do {
+        hubX = Math.random() * (width - 200) + 100;
+        hubY = Math.random() * (height - 200) + 100;
+        tries++;
+    } while (isInUiZone(hubX, hubY) && tries < 100);
+    nodes.push(new Node(hubX, hubY, 'hub', 'hub'));
     const count = Math.floor(Math.random() * 11) + 25; // 25-35
     for (let i = 0; i < count; i++) {
         let x, y, tries = 0;
@@ -733,7 +745,7 @@ function generateCanvasNetwork() {
             x = Math.random() * (width - 200) + 100;
             y = Math.random() * (height - 200) + 100;
             tries++;
-        } while (nodes.some(n => getDistance(n.x, n.y, x, y) < 40) && tries < 100);
+        } while ((nodes.some(n => getDistance(n.x, n.y, x, y) < 40) || isInUiZone(x, y)) && tries < 100);
         nodes.push(new Node(x, y, 'node'+i, 'data'));
     }
     // 2. MST (Крускал)
@@ -2704,6 +2716,10 @@ function render() {
         let selected = (id === gameState.selectedNodeId);
         drawNode(ctx, gameState.nodes[id]);
     }
+    
+    // --- Анимации программ ---
+    drawProgramAnimations(ctx);
+    
     // Враги
     for (const enemy of gameState.enemies) {
         const node = gameState.nodes[enemy.currentNodeId];
@@ -3031,6 +3047,10 @@ function update(dt, now) {
     if (gameState.phase !== 'PLAYING') return;
 
     gameState.game_time += dt;
+    
+    // --- Обновление анимаций программ ---
+    updateProgramAnimations(dt, now);
+    generateProgramAnimations(now);
 
     // --- Win/Loss Conditions ---
     if (!godMode) {
@@ -3591,6 +3611,30 @@ function startNewGame() {
         taxEffects: [],
         waveEffects: [],
         eventEffects: []
+    };
+    
+    // Инициализация системы анимаций программ
+    programAnimations = {
+        miner: {
+            particles: [],
+            lastParticleTime: 0,
+            particleInterval: 800
+        },
+        sentry: {
+            flashes: [],
+            lastFlashTime: 0,
+            flashInterval: 1200
+        },
+        anti_exe: {
+            bolts: [],
+            lastBoltTime: 0,
+            boltInterval: 1500
+        },
+        overclocker: {
+            pulses: [],
+            lastPulseTime: 0,
+            pulseInterval: 2000
+        }
     };
     
     // Сброс статистики и логов
@@ -5040,6 +5084,206 @@ function manageProgramActivity() {
         }
     }
 }
+
+// --- Система анимаций программ ---
+let programAnimations = {
+    miner: {
+        particles: [],
+        lastParticleTime: 0,
+        particleInterval: 800 // Частицы каждые 800мс
+    },
+    sentry: {
+        flashes: [],
+        lastFlashTime: 0,
+        flashInterval: 1200 // Вспышки каждые 1200мс
+    },
+    anti_exe: {
+        bolts: [],
+        lastBoltTime: 0,
+        boltInterval: 1500 // Разряды каждые 1500мс
+    },
+    overclocker: {
+        pulses: [],
+        lastPulseTime: 0,
+        pulseInterval: 2000 // Пульсация каждые 2000мс
+    }
+};
+
+// --- Функции создания анимаций ---
+function createMinerParticle(x, y, level) {
+    return {
+        x: x,
+        y: y,
+        vx: (Math.random() - 0.5) * 2,
+        vy: (Math.random() - 0.5) * 2,
+        life: 1.0,
+        maxLife: 1.0,
+        size: 2 + level,
+        color: '#ffd600'
+    };
+}
+
+function createSentryFlash(x, y, level) {
+    return {
+        x: x,
+        y: y,
+        radius: 8 + level * 2,
+        life: 1.0,
+        maxLife: 0.3,
+        color: '#00eaff'
+    };
+}
+
+function createAntiExeBolt(x, y, level) {
+    const angle = Math.random() * Math.PI * 2;
+    const distance = 15 + level * 3;
+    return {
+        x: x,
+        y: y,
+        endX: x + Math.cos(angle) * distance,
+        endY: y + Math.sin(angle) * distance,
+        life: 1.0,
+        maxLife: 0.2,
+        width: 1 + level,
+        color: '#ff1744'
+    };
+}
+
+function createOverclockerPulse(x, y, level) {
+    return {
+        x: x,
+        y: y,
+        radius: 10 + level * 2,
+        life: 1.0,
+        maxLife: 0.8,
+        color: '#b388ff'
+    };
+}
+
+// --- Обновление анимаций ---
+function updateProgramAnimations(dt, now) {
+    // Обновляем частицы miner
+    programAnimations.miner.particles = programAnimations.miner.particles.filter(particle => {
+        particle.x += particle.vx * dt * 60;
+        particle.y += particle.vy * dt * 60;
+        particle.life -= dt * 2;
+        return particle.life > 0;
+    });
+    
+    // Обновляем вспышки sentry
+    programAnimations.sentry.flashes = programAnimations.sentry.flashes.filter(flash => {
+        flash.life -= dt * 3;
+        return flash.life > 0;
+    });
+    
+    // Обновляем разряды anti_exe
+    programAnimations.anti_exe.bolts = programAnimations.anti_exe.bolts.filter(bolt => {
+        bolt.life -= dt * 5;
+        return bolt.life > 0;
+    });
+    
+    // Обновляем пульсацию overclocker
+    programAnimations.overclocker.pulses = programAnimations.overclocker.pulses.filter(pulse => {
+        pulse.life -= dt * 1.25;
+        return pulse.life > 0;
+    });
+}
+
+// --- Отрисовка анимаций ---
+function drawProgramAnimations(ctx) {
+    // Отрисовка частиц miner
+    programAnimations.miner.particles.forEach(particle => {
+        ctx.save();
+        ctx.globalAlpha = particle.life;
+        ctx.fillStyle = particle.color;
+        ctx.beginPath();
+        ctx.arc(particle.x, particle.y, particle.size * particle.life, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+    });
+    
+    // Отрисовка вспышек sentry
+    programAnimations.sentry.flashes.forEach(flash => {
+        ctx.save();
+        ctx.globalAlpha = flash.life * 0.6;
+        ctx.strokeStyle = flash.color;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(flash.x, flash.y, flash.radius * (1 - flash.life), 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+    });
+    
+    // Отрисовка разрядов anti_exe
+    programAnimations.anti_exe.bolts.forEach(bolt => {
+        ctx.save();
+        ctx.globalAlpha = bolt.life;
+        ctx.strokeStyle = bolt.color;
+        ctx.lineWidth = bolt.width;
+        ctx.shadowColor = bolt.color;
+        ctx.shadowBlur = 8;
+        ctx.beginPath();
+        ctx.moveTo(bolt.x, bolt.y);
+        ctx.lineTo(bolt.endX, bolt.endY);
+        ctx.stroke();
+        ctx.restore();
+    });
+    
+    // Отрисовка пульсации overclocker
+    programAnimations.overclocker.pulses.forEach(pulse => {
+        ctx.save();
+        ctx.globalAlpha = pulse.life * 0.4;
+        ctx.strokeStyle = pulse.color;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(pulse.x, pulse.y, pulse.radius * (1 + pulse.life), 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+    });
+}
+
+// --- Генерация анимаций для активных программ ---
+function generateProgramAnimations(now) {
+    for (const nodeId in gameState.nodes) {
+        const node = gameState.nodes[nodeId];
+        if (node.owner === 'player' && node.program && node.program.isActive !== false) {
+            const program = node.program;
+            const level = program.level || 1;
+            
+            switch (program.type) {
+                case 'miner':
+                    if (now - programAnimations.miner.lastParticleTime > programAnimations.miner.particleInterval) {
+                        programAnimations.miner.particles.push(createMinerParticle(node.x, node.y, level));
+                        programAnimations.miner.lastParticleTime = now;
+                    }
+                    break;
+                    
+                case 'sentry':
+                    if (now - programAnimations.sentry.lastFlashTime > programAnimations.sentry.flashInterval) {
+                        programAnimations.sentry.flashes.push(createSentryFlash(node.x, node.y, level));
+                        programAnimations.sentry.lastFlashTime = now;
+                    }
+                    break;
+                    
+                case 'anti_exe':
+                    if (now - programAnimations.anti_exe.lastBoltTime > programAnimations.anti_exe.boltInterval) {
+                        programAnimations.anti_exe.bolts.push(createAntiExeBolt(node.x, node.y, level));
+                        programAnimations.anti_exe.lastBoltTime = now;
+                    }
+                    break;
+                    
+                case 'overclocker':
+                    if (now - programAnimations.overclocker.lastPulseTime > programAnimations.overclocker.pulseInterval) {
+                        programAnimations.overclocker.pulses.push(createOverclockerPulse(node.x, node.y, level));
+                        programAnimations.overclocker.lastPulseTime = now;
+                    }
+                    break;
+            }
+        }
+    }
+}
+
+// ... existing code ...
 
 
  
