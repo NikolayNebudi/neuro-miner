@@ -91,6 +91,16 @@ let gameStats = {
     }
 };
 
+// ... глобальные переменные ...
+let networkBreakAlert = {
+    active: false,
+    timer: 0,
+    destroyedNodes: [],
+    lostDP: 0,
+    lostCPU: 0
+};
+// ... existing code ...
+
 // --- КЛАССЫ (объявляем в начале) ---
 
 // Класс для групповых атак врагов
@@ -2798,6 +2808,8 @@ function render() {
 
     // --- Визуализация групповых атак ---
     drawGroupAttackIndicators(ctx);
+    // ВИЗУАЛИЗАЦИЯ ОБРЫВА СЕТИ
+    drawNetworkBreakAlert(ctx);
 }
 
 // --- Визуализация групповых атак ---
@@ -3241,7 +3253,7 @@ function update(dt, now) {
                         node.owner = 'neutral'; node.program = null; node.captureProgress = 0;
                         if(gameState.selectedNodeId === node.id) gameState.selectedNodeId = null;
                         triggerScreenShake(7, 250); sound.play('node_lost');
-                        destroyIsolatedNetworkChunks();
+                        destroyIsolatedNetworkChunks(node.id);
                     }
                 }
             }
@@ -3306,6 +3318,17 @@ function update(dt, now) {
     for (const id in gameState.nodes) {
         const node = gameState.nodes[id];
         if (node.isTargeted && now > node.targetedUntil) node.isTargeted = false;
+    }
+    // --- Сброс networkBreakAlert ---
+    if (networkBreakAlert.active) {
+        networkBreakAlert.timer -= dt;
+        if (networkBreakAlert.timer <= 0) {
+            networkBreakAlert.active = false;
+            networkBreakAlert.destroyedNodes = [];
+            networkBreakAlert.lostDP = 0;
+            networkBreakAlert.lostCPU = 0;
+            networkBreakAlert.timer = 0;
+        }
     }
 }
 
@@ -4684,7 +4707,7 @@ function drawEnemyInfo(ctx, enemy) {
 }
 
 // --- Функция поиска и разрушения отсоединённых кусков сети ---
-function destroyIsolatedNetworkChunks() {
+function destroyIsolatedNetworkChunks(justLostNodeId = null) {
     const nodes = gameState.nodes;
     const hubId = gameState.playerRootNodeId || 'hub';
     const visited = new Set();
@@ -4716,7 +4739,17 @@ function destroyIsolatedNetworkChunks() {
         }
     }
     if (lostNodes.length === 0) return;
-    // Применяем штраф
+    // --- Если потеряна только одна нода (крайняя) ---
+    if (lostNodes.length === 1 && justLostNodeId && lostNodes[0] === justLostNodeId) {
+        // Малый штраф
+        const dpPenalty = 10;
+        const cpuPenalty = 2;
+        gameState.dp = Math.max(0, gameState.dp - dpPenalty);
+        gameState.cpu = Math.max(0, gameState.cpu - cpuPenalty);
+        addGameLog(`Потеряна нода ${justLostNodeId}. Потери: -${dpPenalty} DP, -${cpuPenalty} CPU`, 'warning');
+        return;
+    }
+    // --- Обрыв сети: большой штраф и алерт ---
     const percentPenalty = 0.1; // 10%
     const dpPenalty = Math.round(gameState.dp * percentPenalty) + lostNodes.length * 10 + lostPrograms * 20;
     const cpuPenalty = Math.round(gameState.cpu * percentPenalty) + lostPrograms * 5;
@@ -4726,15 +4759,72 @@ function destroyIsolatedNetworkChunks() {
     for (const nodeId of lostNodes) {
         nodes[nodeId].owner = 'neutral';
         nodes[nodeId].program = null;
-        // Можно добавить визуальный эффект разрушения
         visualEffects.enemyExplosions.push({x: nodes[nodeId].x, y: nodes[nodeId].y, time: performance.now()});
     }
     addGameLog(`⚠️ Часть сети уничтожена! Потери: -${dpPenalty} DP, -${cpuPenalty} CPU`, 'warning');
+    // --- Визуализация обрыва сети ---
+    networkBreakAlert.active = true;
+    networkBreakAlert.timer = 2.0; // 2 секунды
+    networkBreakAlert.destroyedNodes = lostNodes.map(id => ({x: nodes[id].x, y: nodes[id].y}));
+    networkBreakAlert.lostDP = dpPenalty;
+    networkBreakAlert.lostCPU = cpuPenalty;
+    triggerScreenShake(12, 600);
 }
 
-// --- ВСТАВИТЬ В МЕСТО ЗАХВАТА/РАЗРУШЕНИЯ НОДЫ ВРАГОМ ---
-// После node.owner = 'enemy' или разрушения программы:
-// destroyIsolatedNetworkChunks();
+// --- Функция отрисовки всплывающего сообщения обрыва сети ---
+function drawNetworkBreakAlert(ctx) {
+    if (!networkBreakAlert.active) return;
+    const alpha = Math.min(1, networkBreakAlert.timer / 0.3); // Плавное появление
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.font = 'bold 32px Fira Mono, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const centerX = canvas.width / 2;
+    const centerY = canvas.height / 2;
+    ctx.fillStyle = '#ff1744';
+    ctx.strokeStyle = '#ffd600';
+    ctx.lineWidth = 4;
+    ctx.strokeText('⚠️ СЕТЬ ОБОРВАНА!', centerX, centerY - 30);
+    ctx.fillText('⚠️ СЕТЬ ОБОРВАНА!', centerX, centerY - 30);
+    ctx.font = 'bold 22px Fira Mono, monospace';
+    ctx.fillStyle = '#fff';
+    ctx.strokeStyle = '#232b33';
+    ctx.lineWidth = 2;
+    const msg = `Разрушено: ${networkBreakAlert.destroyedNodes.length} нод | Потери: -${networkBreakAlert.lostDP} DP, -${networkBreakAlert.lostCPU} CPU`;
+    ctx.strokeText(msg, centerX, centerY + 10);
+    ctx.fillText(msg, centerX, centerY + 10);
+    ctx.restore();
+    // Подсветка разрушенных нод
+    ctx.save();
+    ctx.globalAlpha = 0.7 * alpha;
+    for (const n of networkBreakAlert.destroyedNodes) {
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, 32, 0, 2 * Math.PI);
+        ctx.strokeStyle = '#ff1744';
+        ctx.lineWidth = 6;
+        ctx.stroke();
+    }
+    ctx.restore();
+}
+
+// --- Вызов в render() ---
+// drawNetworkBreakAlert(ctx);
+// ... existing code ...
+
+// --- В update(dt, now) ---
+// Таймер для networkBreakAlert
+if (networkBreakAlert.active) {
+    networkBreakAlert.timer -= dt;
+    if (networkBreakAlert.timer <= 0) {
+        networkBreakAlert.active = false;
+        networkBreakAlert.destroyedNodes = [];
+        networkBreakAlert.lostDP = 0;
+        networkBreakAlert.lostCPU = 0;
+        networkBreakAlert.timer = 0;
+    }
+}
+// ... existing code ...
 
 
  
