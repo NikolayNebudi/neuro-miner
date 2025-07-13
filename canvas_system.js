@@ -33,7 +33,26 @@ let gameState = {
     achievementPoints: 0,
     comboKills: 0,
     lastKillTime: 0,
-    comboTimeout: 3000 // 3 секунды для комбо
+    comboTimeout: 3000, // 3 секунды для комбо
+    
+    // Система адаптивной сложности
+    adaptiveDifficulty: {
+        playerPerformance: 0,      // Оценка производительности игрока (0-100)
+        difficultyMultiplier: 1.0, // Множитель сложности
+        lastAdjustment: 0,         // Время последней корректировки
+        adjustmentInterval: 30000,  // Интервал корректировки (30 сек)
+        performanceHistory: [],     // История производительности
+        maxHistorySize: 10,        // Максимальный размер истории
+        targetPerformance: 70      // Целевая производительность (70%)
+    },
+    
+    // Система анализа угроз
+    threatAnalysis: {
+        lastAnalysis: 0,
+        analysisInterval: 5000,    // Анализ каждые 5 секунд
+        threatMap: {},             // Карта угроз по нодам
+        bypassRoutes: {}           // Альтернативные маршруты
+    }
 };
 let uiButtons = {};
 let visualEffects = { 
@@ -182,7 +201,9 @@ const ENEMY_BEHAVIORS = {
         speed: 1.2,
         targetPriority: ['miner', 'overclocker', 'hub'],
         special: 'disables_programs',
-        description: 'Отключает программы на нодах'
+        description: 'Отключает программы на нодах',
+        threatLevel: 0.7,
+        coordinationType: 'support'
     },
     'bomber': {
         name: '💣 Бомбардировщик',
@@ -190,7 +211,9 @@ const ENEMY_BEHAVIORS = {
         speed: 0.8,
         targetPriority: ['hub', 'sentry'],
         special: 'explodes_on_death',
-        description: 'Взрывается при смерти, нанося урон соседним нодам'
+        description: 'Взрывается при смерти, нанося урон соседним нодам',
+        threatLevel: 0.9,
+        coordinationType: 'sacrifice'
     },
     'stealth': {
         name: '👻 Стелс',
@@ -198,7 +221,9 @@ const ENEMY_BEHAVIORS = {
         speed: 1.5,
         targetPriority: ['miner', 'hub'],
         special: 'invisible_to_sentry',
-        description: 'Невидим для Sentry, может проходить незамеченным'
+        description: 'Невидим для Sentry, может проходить незамеченным',
+        threatLevel: 0.6,
+        coordinationType: 'scout'
     },
     'healer': {
         name: '💚 Лекарь',
@@ -206,7 +231,9 @@ const ENEMY_BEHAVIORS = {
         speed: 0.7,
         targetPriority: ['enemy_healing'],
         special: 'heals_other_enemies',
-        description: 'Лечит других врагов'
+        description: 'Лечит других врагов',
+        threatLevel: 0.8,
+        coordinationType: 'support'
     },
     'commander': {
         name: '👑 Командир',
@@ -214,7 +241,9 @@ const ENEMY_BEHAVIORS = {
         speed: 0.9,
         targetPriority: ['hub'],
         special: 'boosts_other_enemies',
-        description: 'Усиливает других врагов в радиусе'
+        description: 'Усиливает других врагов в радиусе',
+        threatLevel: 1.0,
+        coordinationType: 'leader'
     },
     'shield': {
         name: '🛡️ Щитоносец',
@@ -222,7 +251,9 @@ const ENEMY_BEHAVIORS = {
         speed: 0.6,
         targetPriority: ['hub'],
         special: 'blocks_sentry_shots',
-        description: 'Блокирует выстрелы Sentry для других врагов'
+        description: 'Блокирует выстрелы Sentry для других врагов',
+        threatLevel: 0.8,
+        coordinationType: 'tank'
     },
     'juggernaut': {
         name: '⚔️ Джаггернаут',
@@ -230,7 +261,9 @@ const ENEMY_BEHAVIORS = {
         speed: 0.5,
         targetPriority: ['sentry', 'hub'],
         special: 'high_armor_piercing',
-        description: 'Высокая броня, пробивает оборону'
+        description: 'Высокая броня, пробивает оборону',
+        threatLevel: 1.2,
+        coordinationType: 'tank'
     },
     'swarm': {
         name: '🐝 Рой',
@@ -238,7 +271,9 @@ const ENEMY_BEHAVIORS = {
         speed: 2.0,
         targetPriority: ['miner', 'hub'],
         special: 'swarm_attack',
-        description: 'Атакует роем, обходит Sentry'
+        description: 'Атакует роем, обходит Sentry',
+        threatLevel: 0.5,
+        coordinationType: 'swarm'
     },
     'emp': {
         name: '⚡ ЭМИ',
@@ -246,7 +281,76 @@ const ENEMY_BEHAVIORS = {
         speed: 1.0,
         targetPriority: ['sentry', 'hub'],
         special: 'disables_sentry',
-        description: 'Временно отключает Sentry'
+        description: 'Временно отключает Sentry',
+        threatLevel: 0.9,
+        coordinationType: 'support'
+    }
+};
+
+// Система анализа угроз для AI врагов
+const THREAT_ANALYSIS = {
+    // Веса различных угроз
+    weights: {
+        sentry: 10.0,      // Высокая угроза от турелей
+        anti_exe: 8.0,     // Высокая угроза от ANTI.EXE
+        hub_level: 2.0,    // Угроза от уровня Hub
+        player_nodes: 1.0, // Угроза от количества нод игрока
+        nearby_enemies: 0.5 // Поддержка от других врагов
+    },
+    
+    // Радиус анализа угроз
+    analysisRadius: 300,
+    
+    // Порог для обхода
+    bypassThreshold: 15.0,
+    
+    // Коэффициенты для разных типов врагов
+    bypassMultipliers: {
+        stealth: 0.3,    // Стелс легче обходит угрозы
+        swarm: 0.5,      // Рой может рисковать
+        tank: 1.5,       // Танки игнорируют некоторые угрозы
+        scout: 0.4,      // Разведчики обходят угрозы
+        default: 1.0
+    }
+};
+
+// Система координации врагов
+const ENEMY_COORDINATION = {
+    // Радиус координации
+    coordinationRadius: 200,
+    
+    // Типы координации
+    types: {
+        leader: {
+            radius: 250,
+            effect: 'boost_allies',
+            description: 'Усиливает союзников в радиусе'
+        },
+        support: {
+            radius: 150,
+            effect: 'heal_allies',
+            description: 'Лечит союзников'
+        },
+        tank: {
+            radius: 120,
+            effect: 'protect_allies',
+            description: 'Защищает союзников'
+        },
+        scout: {
+            radius: 300,
+            effect: 'reveal_threats',
+            description: 'Обнаруживает угрозы'
+        },
+        swarm: {
+            radius: 100,
+            effect: 'group_attack',
+            description: 'Атакует группой'
+        },
+        sacrifice: {
+            radius: 180,
+            effect: 'suicide_attack',
+            description: 'Жертвует собой ради группы'
+        }
     }
 };
 
@@ -2425,6 +2529,29 @@ function render() {
     visualEffects.enemyExplosions = visualEffects.enemyExplosions.filter(boom => (performance.now() - boom.time) < 420);
     visualEffects.achievementEffects = visualEffects.achievementEffects.filter(effect => (performance.now() - effect.time) < 3000);
     
+    // Обновление адаптивной сложности
+    updateAdaptiveDifficulty(performance.now());
+    
+    // Отрисовка улучшенных подсказок
+    updateHints(performance.now());
+    drawEnhancedHint(ctx);
+    
+    // Отрисовка индикаторов угроз
+    drawThreatIndicators(ctx);
+    
+    // Отрисовка информации о врагах при наведении
+    if (hoveredNodeId) {
+        const hoveredNode = gameState.nodes[hoveredNodeId];
+        if (hoveredNode) {
+            for (const enemy of gameState.enemies) {
+                if (enemy.currentNodeId === hoveredNodeId) {
+                    drawEnemyInfo(ctx, enemy);
+                    break;
+                }
+            }
+        }
+    }
+    
     // --- Отрисовка эффектов волн ---
     for (const effect of visualEffects.waveEffects) {
         const t = (performance.now() - effect.time) / (effect.duration * 1000);
@@ -2810,6 +2937,14 @@ function update(dt, now) {
     
     // --- Обновление поведения врагов ---
     updateEnemyBehaviors(dt, now);
+    
+    // Применение адаптивной сложности к новым врагам
+    for (const enemy of gameState.enemies) {
+        if (!enemy.adaptiveApplied) {
+            applyAdaptiveDifficulty(enemy);
+            enemy.adaptiveApplied = true;
+        }
+    }
 
     // Логика врагов (движение, атака)
     if (gameState.enemies) {
@@ -2957,6 +3092,30 @@ function startNewGame() {
     gameState.win = false;
     gameState.phase = 'PLAYING';
     gameState.hubLevel = 1;
+    
+    // Инициализация системы адаптивной сложности
+    gameState.adaptiveDifficulty = {
+        playerPerformance: 0,
+        difficultyMultiplier: 1.0,
+        lastAdjustment: 0,
+        adjustmentInterval: 30000,
+        performanceHistory: [],
+        maxHistorySize: 10,
+        targetPerformance: 70
+    };
+    
+    // Инициализация системы анализа угроз
+    gameState.threatAnalysis = {
+        lastAnalysis: 0,
+        analysisInterval: 5000,
+        threatMap: {},
+        bypassRoutes: {}
+    };
+    
+    // Инициализация системы подсказок
+    HINT_SYSTEM.currentHint = 0;
+    HINT_SYSTEM.hintType = 'newPlayer';
+    HINT_SYSTEM.lastHintChange = performance.now();
     
     // Инициализация системы волн и событий
     gameState.currentWave = 1;
@@ -3622,34 +3781,307 @@ function checkExtendedAchievements() {
     }
 }
 
+// Функция анализа угроз для AI врагов
+function analyzeThreatLevel(enemy, targetNodeId) {
+    if (!gameState || !gameState.nodes || !targetNodeId) return 0;
+    
+    const targetNode = gameState.nodes[targetNodeId];
+    if (!targetNode) return 0;
+    
+    let threatLevel = 0;
+    const weights = THREAT_ANALYSIS.weights;
+    const radius = THREAT_ANALYSIS.analysisRadius;
+    
+    // Анализируем все ноды в радиусе
+    for (const nodeId in gameState.nodes) {
+        const node = gameState.nodes[nodeId];
+        if (!node) continue;
+        
+        const dist = getDistance(targetNode.x, targetNode.y, node.x, node.y);
+        if (dist > radius) continue;
+        
+        // Угроза от Sentry
+        if (node.owner === 'player' && node.program && node.program.type === 'sentry') {
+            const sentryLevel = node.program.level || 1;
+            const sentryThreat = weights.sentry * sentryLevel * (1 - dist / radius);
+            threatLevel += sentryThreat;
+        }
+        
+        // Угроза от ANTI.EXE
+        if (node.owner === 'player' && node.program && node.program.type === 'anti_exe') {
+            const antiExeThreat = weights.anti_exe * (1 - dist / radius);
+            threatLevel += antiExeThreat;
+        }
+        
+        // Угроза от уровня Hub
+        if (node.id === 'hub' && node.owner === 'player') {
+            const hubThreat = weights.hub_level * gameState.hubLevel * (1 - dist / radius);
+            threatLevel += hubThreat;
+        }
+    }
+    
+    // Поддержка от других врагов
+    for (const otherEnemy of gameState.enemies) {
+        if (otherEnemy === enemy || otherEnemy.health <= 0) continue;
+        
+        const enemyNode = gameState.nodes[otherEnemy.currentNodeId];
+        if (!enemyNode) continue;
+        
+        const dist = getDistance(targetNode.x, targetNode.y, enemyNode.x, enemyNode.y);
+        if (dist < ENEMY_COORDINATION.coordinationRadius) {
+            const supportBonus = weights.nearby_enemies * (1 - dist / ENEMY_COORDINATION.coordinationRadius);
+            threatLevel -= supportBonus; // Уменьшаем угрозу благодаря поддержке
+        }
+    }
+    
+    // Применяем модификаторы для разных типов врагов
+    const behavior = ENEMY_BEHAVIORS[enemy.type];
+    const bypassMultiplier = THREAT_ANALYSIS.bypassMultipliers[enemy.type] || THREAT_ANALYSIS.bypassMultipliers.default;
+    
+    return threatLevel * bypassMultiplier;
+}
+
+// Функция поиска альтернативного пути
+function findAlternativePath(enemy, currentPath) {
+    if (!gameState || !gameState.nodes) return currentPath;
+    
+    const startNodeId = enemy.currentNodeId;
+    const targetNodeId = currentPath[currentPath.length - 1];
+    
+    // Находим все возможные пути к цели
+    const allPaths = [];
+    const visited = new Set();
+    
+    function dfs(currentId, path, maxDepth = 8) {
+        if (path.length > maxDepth) return;
+        if (currentId === targetNodeId) {
+            allPaths.push([...path]);
+            return;
+        }
+        
+        const currentNode = gameState.nodes[currentId];
+        if (!currentNode) return;
+        
+        for (const neighborId of currentNode.neighbors) {
+            if (visited.has(neighborId)) continue;
+            
+            visited.add(neighborId);
+            path.push(neighborId);
+            dfs(neighborId, path, maxDepth);
+            path.pop();
+            visited.delete(neighborId);
+        }
+    }
+    
+    dfs(startNodeId, [startNodeId]);
+    
+    // Оцениваем каждый путь по уровню угроз
+    let bestPath = currentPath;
+    let bestThreatLevel = Infinity;
+    
+    for (const path of allPaths) {
+        let totalThreat = 0;
+        for (const nodeId of path) {
+            totalThreat += analyzeThreatLevel(enemy, nodeId);
+        }
+        
+        if (totalThreat < bestThreatLevel) {
+            bestThreatLevel = totalThreat;
+            bestPath = path;
+        }
+    }
+    
+    return bestPath;
+}
+
+// Функция координации между врагами
+function coordinateEnemies(enemy, dt, now) {
+    if (!gameState || !gameState.enemies) return;
+    
+    const behavior = ENEMY_BEHAVIORS[enemy.type];
+    if (!behavior || !behavior.coordinationType) return;
+    
+    const coordinationType = ENEMY_COORDINATION.types[behavior.coordinationType];
+    if (!coordinationType) return;
+    
+    const enemyNode = gameState.nodes[enemy.currentNodeId];
+    if (!enemyNode) return;
+    
+    const radius = coordinationType.radius;
+    
+    switch (coordinationType.effect) {
+        case 'boost_allies':
+            // Командир усиливает союзников
+            for (const otherEnemy of gameState.enemies) {
+                if (otherEnemy === enemy || otherEnemy.health <= 0) continue;
+                
+                const otherNode = gameState.nodes[otherEnemy.currentNodeId];
+                if (!otherNode) continue;
+                
+                const dist = getDistance(enemyNode.x, enemyNode.y, otherNode.x, otherNode.y);
+                if (dist < radius) {
+                    otherEnemy.damageMultiplier = Math.max(otherEnemy.damageMultiplier || 1, 1.3);
+                    otherEnemy.speed = Math.min(otherEnemy.speed * 1.1, 3.0); // Увеличиваем скорость
+                }
+            }
+            break;
+            
+        case 'heal_allies':
+            // Лекарь лечит союзников
+            if (enemy.lastHealTime + enemy.healCooldown < now) {
+                for (const otherEnemy of gameState.enemies) {
+                    if (otherEnemy === enemy || otherEnemy.health <= 0) continue;
+                    
+                    const otherNode = gameState.nodes[otherEnemy.currentNodeId];
+                    if (!otherNode) continue;
+                    
+                    const dist = getDistance(enemyNode.x, enemyNode.y, otherNode.x, otherNode.y);
+                    if (dist < radius && otherEnemy.health < otherEnemy.maxHealth) {
+                        otherEnemy.health = Math.min(otherEnemy.maxHealth, otherEnemy.health + 25);
+                        enemy.lastHealTime = now;
+                        
+                        // Визуальный эффект исцеления
+                        visualEffects.healEffects = visualEffects.healEffects || [];
+                        visualEffects.healEffects.push({
+                            x: otherNode.x,
+                            y: otherNode.y,
+                            time: now,
+                            duration: 1000
+                        });
+                        break;
+                    }
+                }
+            }
+            break;
+            
+        case 'protect_allies':
+            // Танк защищает союзников
+            for (const otherEnemy of gameState.enemies) {
+                if (otherEnemy === enemy || otherEnemy.health <= 0) continue;
+                
+                const otherNode = gameState.nodes[otherEnemy.currentNodeId];
+                if (!otherNode) continue;
+                
+                const dist = getDistance(enemyNode.x, enemyNode.y, otherNode.x, otherNode.y);
+                if (dist < radius) {
+                    // Уменьшаем урон, получаемый союзниками
+                    otherEnemy.armor = Math.max(otherEnemy.armor || 1, 1.2);
+                }
+            }
+            break;
+            
+        case 'reveal_threats':
+            // Разведчик обнаруживает угрозы
+            for (const nodeId in gameState.nodes) {
+                const node = gameState.nodes[nodeId];
+                if (!node || node.owner !== 'player') continue;
+                
+                const dist = getDistance(enemyNode.x, enemyNode.y, node.x, node.y);
+                if (dist < radius) {
+                    // Помечаем ноду как обнаруженную для других врагов
+                    node.revealedByScout = true;
+                    node.revealTime = now + 5000; // 5 секунд видимости
+                }
+            }
+            break;
+            
+        case 'group_attack':
+            // Рой атакует группой
+            let nearbyAllies = 0;
+            for (const otherEnemy of gameState.enemies) {
+                if (otherEnemy === enemy || otherEnemy.health <= 0) continue;
+                
+                const otherNode = gameState.nodes[otherEnemy.currentNodeId];
+                if (!otherNode) continue;
+                
+                const dist = getDistance(enemyNode.x, enemyNode.y, otherNode.x, otherNode.y);
+                if (dist < radius) {
+                    nearbyAllies++;
+                }
+            }
+            
+            // Бонус к урону за каждого союзника
+            if (nearbyAllies > 0) {
+                enemy.damageMultiplier = Math.max(enemy.damageMultiplier || 1, 1 + nearbyAllies * 0.2);
+            }
+            break;
+            
+        case 'suicide_attack':
+            // Бомбардировщик готовится к самоубийственной атаке
+            const targetNode = gameState.nodes[enemy.path[enemy.path.length - 1]];
+            if (targetNode && targetNode.owner === 'player') {
+                const dist = getDistance(enemyNode.x, enemyNode.y, targetNode.x, targetNode.y);
+                if (dist < 100) { // Близко к цели
+                    enemy.suicideMode = true;
+                    enemy.speed *= 1.5; // Ускоряется для самоубийственной атаки
+                }
+            }
+            break;
+    }
+}
+
 // --- Функции для новых типов врагов ---
 function updateEnemyBehaviors(dt, now) {
+    if (!gameState || !gameState.enemies) return;
+    
     for (const enemy of gameState.enemies) {
-        if (!enemy) continue;
+        if (!enemy || enemy.health <= 0) continue;
         
-        // Лекарь исцеляет других врагов
-        if (enemy.type === 'healer' && now - enemy.lastHealTime > enemy.healCooldown) {
-            const nearbyEnemies = gameState.enemies.filter(e => 
-                e !== enemy && e.health < e.maxHealth * 0.8
-            );
-            
-            if (nearbyEnemies.length > 0) {
-                const target = nearbyEnemies[0];
-                target.health = Math.min(target.health + 20, target.maxHealth);
-                enemy.lastHealTime = now;
-                addGameLog('💚 Лекарь исцелил врага', 'warning');
+        // Координация с другими врагами
+        coordinateEnemies(enemy, dt, now);
+        
+        // Анализ угроз и поиск альтернативных путей
+        if (enemy.path && enemy.path.length > 0) {
+            const nextNodeId = enemy.path[enemy.pathStep + 1];
+            if (nextNodeId) {
+                const threatLevel = analyzeThreatLevel(enemy, nextNodeId);
+                
+                // Если угроза слишком высока, ищем альтернативный путь
+                if (threatLevel > THREAT_ANALYSIS.bypassThreshold) {
+                    const alternativePath = findAlternativePath(enemy, enemy.path);
+                    if (alternativePath && alternativePath.length > 0) {
+                        enemy.path = alternativePath;
+                        enemy.pathStep = 0;
+                        addGameLog(`🔄 ${enemy.name || 'Враг'} обходит угрозу`, 'info');
+                    }
+                }
             }
         }
         
-        // Командир усиливает других врагов
+        // Обновление специальных способностей (существующая логика)
+        if (enemy.type === 'healer' && enemy.lastHealTime + enemy.healCooldown < now) {
+            // Лекарь лечит ближайших союзников
+            for (const otherEnemy of gameState.enemies) {
+                if (otherEnemy !== enemy && otherEnemy.health < otherEnemy.maxHealth) {
+                    const dist = getDistance(
+                        gameState.nodes[enemy.currentNodeId]?.x || 0,
+                        gameState.nodes[enemy.currentNodeId]?.y || 0,
+                        gameState.nodes[otherEnemy.currentNodeId]?.x || 0,
+                        gameState.nodes[otherEnemy.currentNodeId]?.y || 0
+                    );
+                    if (dist < enemy.boostRadius) {
+                        otherEnemy.health = Math.min(otherEnemy.maxHealth, otherEnemy.health + 20);
+                        enemy.lastHealTime = now;
+                        break;
+                    }
+                }
+            }
+        }
+        
         if (enemy.type === 'commander') {
-            const nearbyEnemies = gameState.enemies.filter(e => 
-                e !== enemy && e.currentNodeId === enemy.currentNodeId
-            );
-            
-            for (const nearby of nearbyEnemies) {
-                nearby.damageMultiplier = 1.5;
-                nearby.speed *= 1.2;
+            // Командир усиливает союзников
+            for (const otherEnemy of gameState.enemies) {
+                if (otherEnemy !== enemy) {
+                    const dist = getDistance(
+                        gameState.nodes[enemy.currentNodeId]?.x || 0,
+                        gameState.nodes[enemy.currentNodeId]?.y || 0,
+                        gameState.nodes[otherEnemy.currentNodeId]?.x || 0,
+                        gameState.nodes[otherEnemy.currentNodeId]?.y || 0
+                    );
+                    if (dist < enemy.boostRadius) {
+                        otherEnemy.damageMultiplier = Math.max(otherEnemy.damageMultiplier || 1, 1.3);
+                    }
+                }
             }
         }
         
@@ -3702,4 +4134,272 @@ const ARMOR_MECHANICS = {
     heavyArmor: 0.4,        // Тяжелая броня (-60% урон)
     piercingBonus: 1.5      // Бонус пробития для специальных врагов
 };
+
+// Система адаптивной сложности
+function calculatePlayerPerformance() {
+    if (!gameState || !gameStats) return 0;
+    
+    let performance = 0;
+    
+    // Факторы производительности
+    const factors = {
+        nodesCaptured: Math.min(gameStats.nodesCaptured / 10, 1) * 20,      // 20% за захват нод
+        enemiesKilled: Math.min(gameStats.enemiesKilled / 50, 1) * 25,      // 25% за убийства
+        survivalTime: Math.min(gameState.game_time / 600, 1) * 15,           // 15% за время выживания
+        resourceEfficiency: Math.min(gameState.dp / 1000, 1) * 20,           // 20% за эффективность ресурсов
+        waveProgress: Math.min(gameState.currentWave / 10, 1) * 20           // 20% за прогресс волн
+    };
+    
+    performance = Object.values(factors).reduce((sum, factor) => sum + factor, 0);
+    
+    return Math.min(Math.max(performance, 0), 100);
+}
+
+function updateAdaptiveDifficulty(now) {
+    if (!gameState.adaptiveDifficulty) return;
+    
+    const adaptive = gameState.adaptiveDifficulty;
+    
+    // Обновляем производительность игрока
+    adaptive.playerPerformance = calculatePlayerPerformance();
+    
+    // Добавляем в историю
+    adaptive.performanceHistory.push(adaptive.playerPerformance);
+    if (adaptive.performanceHistory.length > adaptive.maxHistorySize) {
+        adaptive.performanceHistory.shift();
+    }
+    
+    // Корректируем сложность каждые 30 секунд
+    if (now - adaptive.lastAdjustment > adaptive.adjustmentInterval) {
+        const avgPerformance = adaptive.performanceHistory.reduce((sum, perf) => sum + perf, 0) / adaptive.performanceHistory.length;
+        
+        if (avgPerformance > adaptive.targetPerformance + 10) {
+            // Игрок слишком силен - увеличиваем сложность
+            adaptive.difficultyMultiplier = Math.min(adaptive.difficultyMultiplier * 1.1, 2.0);
+            addGameLog('⚠️ Сложность увеличена', 'warning');
+        } else if (avgPerformance < adaptive.targetPerformance - 10) {
+            // Игрок слишком слаб - уменьшаем сложность
+            adaptive.difficultyMultiplier = Math.max(adaptive.difficultyMultiplier * 0.9, 0.5);
+            addGameLog('🎯 Сложность уменьшена', 'info');
+        }
+        
+        adaptive.lastAdjustment = now;
+    }
+}
+
+// Функция применения адаптивной сложности к врагам
+function applyAdaptiveDifficulty(enemy) {
+    if (!gameState.adaptiveDifficulty) return enemy;
+    
+    const multiplier = gameState.adaptiveDifficulty.difficultyMultiplier;
+    
+    // Увеличиваем характеристики врагов
+    enemy.health = Math.round(enemy.health * multiplier);
+    enemy.maxHealth = Math.round(enemy.maxHealth * multiplier);
+    enemy.speed = Math.min(enemy.speed * multiplier, 4.0); // Ограничиваем максимальную скорость
+    
+    // Увеличиваем урон
+    enemy.damageMultiplier = (enemy.damageMultiplier || 1) * multiplier;
+    
+    return enemy;
+}
+
+// Система улучшенных подсказок
+const HINT_SYSTEM = {
+    hints: {
+        newPlayer: [
+            '💡 Нажмите на ноду, чтобы захватить её',
+            '💡 Постройте Miner для получения DP',
+            '💡 Sentry защищает от врагов',
+            '💡 ANTI.EXE временно останавливает врагов',
+            '💡 Overclocker увеличивает CPU'
+        ],
+        strategy: [
+            '🎯 Создайте оборонительный периметр',
+            '🎯 Используйте ANTI.EXE для контроля',
+            '🎯 Развивайте экономику постепенно',
+            '🎯 Апгрейдите Hub для бонусов',
+            '🎯 Следите за волнами врагов'
+        ],
+        advanced: [
+            '⚡ Враги обходят сильные позиции',
+            '⚡ Координируйте защиту',
+            '⚡ Используйте EMP Blast в критических ситуациях',
+            '⚡ Адаптивная сложность подстраивается под вас',
+            '⚡ Случайные события добавляют разнообразие'
+        ]
+    },
+    
+    currentHint: 0,
+    hintType: 'newPlayer',
+    lastHintChange: 0,
+    hintInterval: 15000 // 15 секунд между подсказками
+};
+
+function updateHints(now) {
+    if (now - HINT_SYSTEM.lastHintChange > HINT_SYSTEM.hintInterval) {
+        HINT_SYSTEM.currentHint = (HINT_SYSTEM.currentHint + 1) % HINT_SYSTEM.hints[HINT_SYSTEM.hintType].length;
+        HINT_SYSTEM.lastHintChange = now;
+    }
+    
+    // Автоматически переключаем тип подсказок в зависимости от прогресса
+    if (gameState.currentWave >= 5 && HINT_SYSTEM.hintType === 'newPlayer') {
+        HINT_SYSTEM.hintType = 'strategy';
+    }
+    if (gameState.currentWave >= 10 && HINT_SYSTEM.hintType === 'strategy') {
+        HINT_SYSTEM.hintType = 'advanced';
+    }
+}
+
+function drawEnhancedHint(ctx) {
+    if (!canvas || !ctx) return;
+    
+    const hints = HINT_SYSTEM.hints[HINT_SYSTEM.hintType];
+    const currentHint = hints[HINT_SYSTEM.currentHint];
+    if (!currentHint) return;
+    
+    ctx.save();
+    ctx.font = 'bold 16px sans-serif';
+    
+    // Функция для разбивки текста на строки по ширине
+    function wrapText(text, maxWidth) {
+        const words = text.split(' ');
+        let lines = [];
+        let line = '';
+        for (let n = 0; n < words.length; n++) {
+            let testLine = line + (line ? ' ' : '') + words[n];
+            let metrics = ctx.measureText(testLine);
+            let testWidth = metrics.width;
+            if (testWidth > maxWidth && n > 0) {
+                lines.push(line);
+                line = words[n];
+            } else {
+                line = testLine;
+            }
+        }
+        lines.push(line);
+        return lines;
+    }
+    
+    const maxHintWidth = Math.min(canvas.width - 60, 420);
+    const lines = wrapText(currentHint, maxHintWidth - 40);
+    const hintWidth = Math.max(...lines.map(line => ctx.measureText(line).width)) + 40;
+    const lineHeight = 24;
+    const hintHeight = lines.length * lineHeight + 20;
+    const hintX = 20;
+    const hintY = canvas.height - hintHeight - 30;
+    
+    // Фон подсказки
+    ctx.fillStyle = 'rgba(35, 43, 51, 0.95)';
+    ctx.strokeStyle = '#ffd600';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.roundRect(hintX, hintY, hintWidth, hintHeight, 10);
+    ctx.fill();
+    ctx.stroke();
+    
+    // Текст подсказки
+    ctx.fillStyle = '#ffd600';
+    ctx.font = 'bold 16px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    for (let i = 0; i < lines.length; i++) {
+        ctx.fillText(lines[i], hintX + 20, hintY + 16 + i * lineHeight);
+    }
+    
+    // Индикатор прогресса
+    const progress = ((performance.now() - HINT_SYSTEM.lastHintChange) / HINT_SYSTEM.hintInterval) * hintWidth;
+    ctx.fillStyle = '#00ff90';
+    ctx.fillRect(hintX, hintY + hintHeight - 4, progress, 4);
+    
+    ctx.restore();
+}
+
+// Система визуальных индикаторов
+function drawThreatIndicators(ctx) {
+    if (!gameState || !gameState.nodes) return;
+    
+    ctx.save();
+    ctx.globalAlpha = 0.6;
+    
+    for (const nodeId in gameState.nodes) {
+        const node = gameState.nodes[nodeId];
+        if (!node || node.owner !== 'player') continue;
+        
+        // Индикатор угрозы для нод с программами
+        if (node.program) {
+            let threatLevel = 0;
+            
+            // Анализируем угрозы вокруг ноды
+            for (const enemy of gameState.enemies) {
+                if (enemy.health <= 0) continue;
+                
+                const enemyNode = gameState.nodes[enemy.currentNodeId];
+                if (!enemyNode) continue;
+                
+                const dist = getDistance(node.x, node.y, enemyNode.x, enemyNode.y);
+                if (dist < 200) {
+                    threatLevel += (200 - dist) / 200;
+                }
+            }
+            
+            if (threatLevel > 0.3) {
+                // Рисуем индикатор угрозы
+                const alpha = Math.min(threatLevel, 1);
+                ctx.fillStyle = `rgba(255, 23, 68, ${alpha})`;
+                ctx.beginPath();
+                ctx.arc(node.x, node.y, 25 + threatLevel * 10, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+    }
+    
+    ctx.restore();
+}
+
+// Система отображения информации о врагах
+function drawEnemyInfo(ctx, enemy) {
+    if (!enemy || !canvas || !ctx) return;
+    
+    const enemyNode = gameState.nodes[enemy.currentNodeId];
+    if (!enemyNode) return;
+    
+    ctx.save();
+    
+    // Фон информации
+    ctx.fillStyle = 'rgba(35, 43, 51, 0.9)';
+    ctx.strokeStyle = '#ff1744';
+    ctx.lineWidth = 2;
+    
+    const infoWidth = 200;
+    const infoHeight = 80;
+    const infoX = enemyNode.x + 30;
+    const infoY = enemyNode.y - 50;
+    
+    ctx.beginPath();
+    ctx.roundRect(infoX, infoY, infoWidth, infoHeight, 8);
+    ctx.fill();
+    ctx.stroke();
+    
+    // Информация о враге
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 14px sans-serif';
+    ctx.textAlign = 'left';
+    
+    const behavior = ENEMY_BEHAVIORS[enemy.type];
+    const enemyName = behavior ? behavior.name : `Враг (${enemy.type})`;
+    
+    ctx.fillText(enemyName, infoX + 10, infoY + 20);
+    ctx.fillText(`Здоровье: ${Math.round(enemy.health)}/${enemy.maxHealth}`, infoX + 10, infoY + 40);
+    ctx.fillText(`Скорость: ${enemy.speed.toFixed(1)}`, infoX + 10, infoY + 60);
+    
+    // Полоска здоровья
+    const healthPercent = enemy.health / enemy.maxHealth;
+    ctx.fillStyle = '#ff1744';
+    ctx.fillRect(infoX + 10, infoY + 25, 180 * healthPercent, 8);
+    ctx.strokeStyle = '#ffffff';
+    ctx.strokeRect(infoX + 10, infoY + 25, 180, 8);
+    
+    ctx.restore();
+}
  
