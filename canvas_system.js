@@ -1,3 +1,11 @@
+// --- Константы потребления CPU программами ---
+const PROGRAM_CPU_USAGE = {
+    sentry: (level = 1) => 3 + (level - 1), // 3 базовое + 1 за каждый уровень
+    anti_exe: (level = 1) => 8 + (level - 1) * 2, // 8 базовое + 2 за каждый уровень
+    miner: (level = 1) => level, // 1 CPU за каждый уровень
+    firewall: 5 // для будущего использования
+};
+
 // --- Глобальные переменные ---
 let gameState = {
     nodes: {},
@@ -1942,6 +1950,15 @@ function drawProgramIcon(ctx, node) {
     if (!node.program || !canvas || !ctx) return;
     let time = performance.now();
     let level = node.program.level || 1;
+    
+    // Если программа неактивна, рисуем серую версию
+    if (node.program.isActive === false) {
+        ctx.save();
+        ctx.globalAlpha = 0.5;
+        ctx.fillStyle = '#666666';
+        ctx.strokeStyle = '#888888';
+    }
+    
     switch(node.program.type) {
         case 'miner':
             drawMinerIcon(ctx, node.x, node.y, time, level);
@@ -1956,78 +1973,168 @@ function drawProgramIcon(ctx, node) {
             drawOverclockerIcon(ctx, node.x, node.y, time, level);
             break;
     }
+    
+    // Восстанавливаем прозрачность для неактивных программ
+    if (node.program.isActive === false) {
+        ctx.restore();
+    }
+    
     // Для HUB рисуем отдельно в drawNode
 }
 
 function drawResourcePanel(ctx) {
     if (!gameState || !gameState.nodes || !canvas || !ctx) return;
+    // --- Параметры плашки ---
+    const panelX = 24, panelY = 24, panelW = 270, panelH = 180;
     ctx.save();
-    ctx.globalAlpha = 0.92;
-    ctx.fillStyle = '#222b';
-    ctx.fillRect(18, 18, 220, 150);
-    ctx.globalAlpha = 1;
-    ctx.font = 'bold 16px sans-serif';
-    ctx.fillStyle = '#fff';
+    ctx.globalAlpha = 0.96;
+    // Фон с неоновой рамкой и тенью
+    ctx.beginPath();
+    ctx.moveTo(panelX + 16, panelY);
+    ctx.lineTo(panelX + panelW - 16, panelY);
+    ctx.quadraticCurveTo(panelX + panelW, panelY, panelX + panelW, panelY + 16);
+    ctx.lineTo(panelX + panelW, panelY + panelH - 16);
+    ctx.quadraticCurveTo(panelX + panelW, panelY + panelH, panelX + panelW - 16, panelY + panelH);
+    ctx.lineTo(panelX + 16, panelY + panelH);
+    ctx.quadraticCurveTo(panelX, panelY + panelH, panelX, panelY + panelH - 16);
+    ctx.lineTo(panelX, panelY + 16);
+    ctx.quadraticCurveTo(panelX, panelY, panelX + 16, panelY);
+    ctx.closePath();
+    ctx.shadowColor = '#00eaff';
+    ctx.shadowBlur = 18;
+    ctx.fillStyle = 'rgba(20,25,35,0.96)';
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = '#00eaff';
+    ctx.stroke();
+    ctx.restore();
+    ctx.save();
+    // --- Технический шрифт ---
+    ctx.font = 'bold 16px Fira Mono, Roboto Mono, Consolas, monospace';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    ctx.fillText('DP: ' + Math.floor(gameState.dp), 32, 40);
-    ctx.fillText('CPU: ' + gameState.cpu, 32, 62);
-    ctx.fillText('TRACE: ' + Math.floor(gameState.traceLevel) + ' / 200', 32, 84);
-    
-    // Информация о волнах
-    if (gameState.phase === 'PLAYING') {
-        ctx.fillStyle = gameState.isWaveBreak ? '#ffff00' : '#00ff00';
-        ctx.fillText('Волна: ' + gameState.currentWave, 32, 106);
-        
-        if (!gameState.isWaveBreak) {
-            ctx.fillStyle = '#ffaa00';
-            ctx.fillText(`Врагов: ${gameState.waveEnemiesSpawned}/${gameState.waveEnemiesTotal}`, 32, 128);
-        } else {
-            ctx.fillStyle = '#00ffff';
-            ctx.fillText(`Перерыв: ${Math.ceil(gameState.waveBreakTimer)}с`, 32, 128);
-        }
-        
-        // Комбо
-        if (gameState.comboKills > 1) {
-            ctx.fillStyle = '#ff6600';
-            ctx.fillText(`Комбо: x${gameState.comboKills}`, 32, 150);
-        }
-        
-        // Активные события
-        if (gameState.activeEvents.length > 0) {
-            ctx.fillStyle = '#ff00ff';
-            ctx.fillText(`События: ${gameState.activeEvents.length}`, 32, 172);
+    const lineH = 28;
+    const iconSize = 18;
+    let y0 = panelY + 16;
+    let x = panelX + 32;
+    const textOffset = 28;
+    // --- DP ---
+    drawChipIcon(ctx, x, y0 + lineH/2 - iconSize/2, iconSize, '#ffd600');
+    ctx.fillStyle = '#ffd600';
+    ctx.fillText('DP: ' + Math.floor(gameState.dp), x + textOffset, y0 + lineH/2);
+    y0 += lineH;
+    // --- TRACE ---
+    drawShieldIcon(ctx, x, y0 + lineH/2 - iconSize/2, iconSize, '#00eaff');
+    ctx.fillStyle = '#b0eaff';
+    ctx.fillText('TRACE: ' + Math.floor(gameState.traceLevel) + ' / 200', x + textOffset, y0 + lineH/2);
+    y0 += lineH;
+    // --- CPU ---
+    let totalCpuUsage = 0;
+    for (const id in gameState.nodes) {
+        const node = gameState.nodes[id];
+        if (node.owner === 'player' && node.program && node.program.isActive !== false) {
+            const cpuUsage = PROGRAM_CPU_USAGE[node.program.type];
+            if (cpuUsage) {
+                const level = node.program.level || 1;
+                const actualCpuUsage = typeof cpuUsage === 'function' ? cpuUsage(level) : cpuUsage;
+                totalCpuUsage += actualCpuUsage;
+            }
         }
     }
-    
-    if (gameState.hubCaptureActive) {
-        ctx.font = 'bold 17px sans-serif';
-        ctx.fillStyle = '#ff1744';
-        ctx.fillText('HUB CAPTURE: ' + Math.floor(gameState.hubCaptureProgress*100) + '%', 32, 194);
+    drawCpuIcon(ctx, x, y0 + lineH/2 - iconSize/2, iconSize, '#00ff90');
+    ctx.fillStyle = totalCpuUsage > gameState.cpu ? '#ff6666' : '#00ff90';
+    let cpuText = `Потребление сети: ${totalCpuUsage} / ${gameState.cpu} CPU`;
+    if (ctx.measureText(cpuText).width > panelW - x - 24) {
+        const parts = cpuText.split(':');
+        ctx.fillText(parts[0]+':', x + textOffset, y0 + lineH/2 - 8);
+        ctx.fillText(parts[1].trim(), x + textOffset, y0 + lineH/2 + 10);
+        y0 += 8;
+    } else {
+        ctx.fillText(cpuText, x + textOffset, y0 + lineH/2);
     }
-    const x = 32, y = 200, w = 180, h = 38;
+    y0 += lineH;
+    // --- Волна ---
+    drawWaveIcon(ctx, x, y0 + lineH/2 - iconSize/2, iconSize, '#00ffea');
+    ctx.fillStyle = '#00ffea';
+    ctx.fillText('Волна: ' + gameState.currentWave, x + textOffset, y0 + lineH/2);
+    y0 += lineH;
+    // --- Враги ---
+    drawEnemyIcon(ctx, x, y0 + lineH/2 - iconSize/2, iconSize, '#ff9100');
+    ctx.fillStyle = '#ff9100';
+    ctx.fillText(`Врагов: ${gameState.waveEnemiesSpawned}/${gameState.waveEnemiesTotal}`, x + textOffset, y0 + lineH/2);
+    ctx.restore();
+}
+
+// --- Киберпанк-иконки ---
+function drawChipIcon(ctx, x, y, size, color) {
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
     ctx.beginPath();
-    // Рисуем скругленный прямоугольник
-    ctx.moveTo(x + 10, y);
-    ctx.lineTo(x + w - 10, y);
-    ctx.quadraticCurveTo(x + w, y, x + w, y + 10);
-    ctx.lineTo(x + w, y + h - 10);
-    ctx.quadraticCurveTo(x + w, y + h, x + w - 10, y + h);
-    ctx.lineTo(x + 10, y + h);
-    ctx.quadraticCurveTo(x, y + h, x, y + h - 10);
-    ctx.lineTo(x, y + 10);
-    ctx.quadraticCurveTo(x, y, x + 10, y);
-    ctx.closePath();
-    ctx.fillStyle = gameState.cpu >= 50 && gameState.empCooldown <= 0 ? '#232b33ee' : '#232b3344';
-    ctx.shadowColor = '#00eaff'; ctx.shadowBlur = 8;
-    ctx.fill();
-    ctx.shadowBlur = 0; ctx.lineWidth = 2; ctx.strokeStyle = '#00eaff'; ctx.stroke();
-    ctx.fillStyle = '#fff'; ctx.font = 'bold 16px sans-serif';
-    let label = 'EMP Blast (50 CPU)';
-    if (gameState.empCooldown > 0) {
-        label = `Cooldown (${Math.ceil(gameState.empCooldown/1000)}s)`;
+    ctx.rect(x, y, size, size);
+    for (let i = 0; i < 4; i++) {
+        ctx.moveTo(x + size/2, y + (i+1)*size/5);
+        ctx.lineTo(x + size/2 - 5, y + (i+1)*size/5 - 3);
+        ctx.moveTo(x + size/2, y + (i+1)*size/5);
+        ctx.lineTo(x + size/2 + 5, y + (i+1)*size/5 + 3);
     }
-    ctx.fillText(label, x + 10, y + h/2 + 2);
+    ctx.stroke();
+    ctx.restore();
+}
+function drawCpuIcon(ctx, x, y, size, color) {
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.rect(x, y, size, size);
+    for (let i = 0; i < 4; i++) {
+        ctx.moveTo(x + size/2, y);
+        ctx.lineTo(x + size/2, y-6);
+        ctx.moveTo(x + size/2, y+size);
+        ctx.lineTo(x + size/2, y+size+6);
+        ctx.rotate(Math.PI/2, x+size/2, y+size/2);
+    }
+    ctx.stroke();
+    ctx.restore();
+}
+function drawShieldIcon(ctx, x, y, size, color) {
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x+size/2, y);
+    ctx.lineTo(x+size, y+size/2);
+    ctx.lineTo(x+size/2, y+size);
+    ctx.lineTo(x, y+size/2);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+}
+function drawWaveIcon(ctx, x, y, size, color) {
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let i = 0; i < size; i++) {
+        ctx.lineTo(x+i, y+size/2 + Math.sin(i/2)*4);
+    }
+    ctx.stroke();
+    ctx.restore();
+}
+function drawEnemyIcon(ctx, x, y, size, color) {
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(x+size/2, y+size/2, size/2-2, 0, 2*Math.PI);
+    ctx.moveTo(x+size/2, y+size/2);
+    ctx.lineTo(x+size/2, y+size-2);
+    ctx.moveTo(x+size/2-4, y+size/2+4);
+    ctx.lineTo(x+size/2-8, y+size-2);
+    ctx.moveTo(x+size/2+4, y+size/2+4);
+    ctx.lineTo(x+size/2+8, y+size-2);
+    ctx.stroke();
     ctx.restore();
 }
 
@@ -2076,18 +2183,28 @@ function drawNode(ctx, node) {
             fill = antiExeColors[Math.min(lvl-1, antiExeColors.length-1)];
             shadow = fill;
             stroke = '#ffe0e0';
-            // Пульсирующий красный глоу и кольца
-            for (let i = 0; i < lvl; i++) {
-                ctx.save();
-                ctx.globalAlpha = 0.2 + 0.1*i;
-                ctx.beginPath();
-                ctx.arc(node.x, node.y, size + 12 + 8*i + 4*Math.sin(time*3 + i), 0, 2 * Math.PI);
-                ctx.strokeStyle = antiExeColors[Math.min(i, antiExeColors.length-1)];
-                ctx.lineWidth = 6 + 2*i;
-                ctx.shadowColor = antiExeColors[Math.min(i, antiExeColors.length-1)];
-                ctx.shadowBlur = 18 + 10*i;
-                ctx.stroke();
-                ctx.restore();
+            
+            // Если программа неактивна, делаем её серой
+            if (node.program.isActive === false) {
+                fill = '#666666';
+                shadow = '#444444';
+                stroke = '#888888';
+            }
+            
+            // Пульсирующий красный глоу и кольца (только для активных)
+            if (node.program.isActive !== false) {
+                for (let i = 0; i < lvl; i++) {
+                    ctx.save();
+                    ctx.globalAlpha = 0.2 + 0.1*i;
+                    ctx.beginPath();
+                    ctx.arc(node.x, node.y, size + 12 + 8*i + 4*Math.sin(time*3 + i), 0, 2 * Math.PI);
+                    ctx.strokeStyle = antiExeColors[Math.min(i, antiExeColors.length-1)];
+                    ctx.lineWidth = 6 + 2*i;
+                    ctx.shadowColor = antiExeColors[Math.min(i, antiExeColors.length-1)];
+                    ctx.shadowBlur = 18 + 10*i;
+                    ctx.stroke();
+                    ctx.restore();
+                }
             }
         }
         if (node.program.type === 'sentry') {
@@ -2095,18 +2212,28 @@ function drawNode(ctx, node) {
             fill = sentryColors[Math.min(lvl-1, sentryColors.length-1)];
             shadow = fill;
             stroke = '#e0ffe7';
-            // Пульсирующие кольца и вспышки
-            for (let i = 0; i < lvl; i++) {
-                ctx.save();
-                ctx.globalAlpha = 0.18 + 0.08*i;
-                ctx.beginPath();
-                ctx.arc(node.x, node.y, size + 14 + 7*i + 4*Math.abs(Math.sin(time*2 + i)), 0, 2 * Math.PI);
-                ctx.strokeStyle = sentryColors[Math.min(i, sentryColors.length-1)];
-                ctx.lineWidth = 4.5 + 2*i;
-                ctx.shadowColor = sentryColors[Math.min(i, sentryColors.length-1)];
-                ctx.shadowBlur = 18 + 8*i;
-                ctx.stroke();
-                ctx.restore();
+            
+            // Если программа неактивна, делаем её серой
+            if (node.program.isActive === false) {
+                fill = '#666666';
+                shadow = '#444444';
+                stroke = '#888888';
+            }
+            
+            // Пульсирующие кольца и вспышки (только для активных)
+            if (node.program.isActive !== false) {
+                for (let i = 0; i < lvl; i++) {
+                    ctx.save();
+                    ctx.globalAlpha = 0.18 + 0.08*i;
+                    ctx.beginPath();
+                    ctx.arc(node.x, node.y, size + 14 + 7*i + 4*Math.abs(Math.sin(time*2 + i)), 0, 2 * Math.PI);
+                    ctx.strokeStyle = sentryColors[Math.min(i, sentryColors.length-1)];
+                    ctx.lineWidth = 4.5 + 2*i;
+                    ctx.shadowColor = sentryColors[Math.min(i, sentryColors.length-1)];
+                    ctx.shadowBlur = 18 + 8*i;
+                    ctx.stroke();
+                    ctx.restore();
+                }
             }
         }
     }
@@ -2254,7 +2381,7 @@ function calculateProgramUIButtons(selectedNode) {
                 buttonData.push({ label: 'ANTI.EXE', cost: 20, type: 'anti_exe' });
             }
             
-            buttonData.push({ label: 'Sentry', cost: 27, type: 'sentry' });
+            buttonData.push({ label: 'Sentry', cost: 13, type: 'sentry' });
         }
         const totalHeight = buttonData.length * (btnH2 + spacing) - spacing;
         const startY = selectedNode.y - totalHeight/2 + offsetY;
@@ -2298,16 +2425,24 @@ function drawProgramUI(ctx, selectedNode) {
                                 prog.level <= 5 ? prog.level * 1.5 : 
                                 prog.level * 2;
             let cost = Math.round(baseCost * levelMultiplier);
-            let cpuCost = 10 * prog.level;
-            label = `Upgrade Lvl ${prog.level+1}\n(${cost}DP, ${cpuCost}CPU)`;
+            label = `Upgrade Lvl ${prog.level+1}\n(${cost} DP)`;
         } else if (btn.type === 'upgrade_hub') {
             // --- Отображение стоимости апгрейда HUB ---
             let cost = 50 * gameState.hubLevel; // Увеличено с 35 до 50
-            label = `Upgrade HUB\n(${cost} CPU)`;
+            label = `Upgrade HUB\n(${cost} DP)`;
         } else {
             let btnLabel = btn.label || '';
-            let btnCost = btn.cost !== undefined ? btn.cost : '?';
-            label = `${btnLabel} (${btnCost} DP)`;
+            let cpuUsage = '';
+            if (btn.type === 'miner') {
+                cpuUsage = '1 CPU'; // miner потребляет 1 CPU на 1 уровне
+            } else if (btn.type === 'anti_exe') {
+                cpuUsage = '8 CPU'; // anti_exe потребляет 8 CPU на 1 уровне
+            } else if (btn.type === 'sentry') {
+                cpuUsage = '3 CPU'; // sentry потребляет 3 CPU на 1 уровне
+            } else if (btn.type === 'overclocker') {
+                cpuUsage = '+5 CPU'; // overclocker добавляет потенциал
+            }
+            label = `${btnLabel} (${cpuUsage})`;
         }
         ctx.textAlign = 'center';
         // Перенос строки, если есть \n
@@ -2951,7 +3086,7 @@ function update(dt, now) {
                 // Регенерация щита
                 
                 // Атака Sentry
-                if (node.program.type === 'sentry') {
+                if (node.program.type === 'sentry' && node.program.isActive !== false) {
                     // Проверяем, не отключен ли Sentry ЭМИ
                     if (node.program.empDisabled && now < node.program.empDisabled) {
                         continue; // Пропускаем атаку
@@ -3068,7 +3203,7 @@ function update(dt, now) {
     // --- ANTI.EXE логика ---
     for (const id in gameState.nodes) {
         const node = gameState.nodes[id];
-        if (node.owner === 'player' && node.program && node.program.type === 'anti_exe') {
+        if (node.owner === 'player' && node.program && node.program.type === 'anti_exe' && node.program.isActive !== false) {
             // Ищем врагов на этой ноде
             for (const enemy of gameState.enemies) {
                 if (enemy.currentNodeId === id && !enemy.isStunnedUntil) {
@@ -3099,7 +3234,7 @@ function update(dt, now) {
             let sentryNeighbors = 0;
             for (const neighborId of node.neighbors) {
                 const neighbor = gameState.nodes[neighborId];
-                if (neighbor && neighbor.owner === 'player' && neighbor.program && neighbor.program.type === 'sentry') {
+                if (neighbor && neighbor.owner === 'player' && neighbor.program && neighbor.program.type === 'sentry' && neighbor.program.isActive !== false) {
                     sentryNeighbors++;
                 }
             }
@@ -3146,45 +3281,58 @@ function update(dt, now) {
     // --- Ресурсы (раз в секунду) ---
     gameState.lastMinerTick += dt;
     if (gameState.lastMinerTick > 1) {
-        let dpIncome = 0, cpuIncome = 0;
-        // Hub пассивно генерирует CPU: 2 + 2 за каждый уровень
+        let dpIncome = 0;
+        // Расчёт потенциала CPU сети (не накапливаемый ресурс)
+        let cpuCapacity = 0;
         if(gameState.nodes['hub'] && gameState.nodes['hub'].owner === 'player') {
-            dpIncome += 2; // Базовый доход от HUB
-            cpuIncome += 2 + (gameState.hubLevel - 1) * 2; // Пассивная генерация CPU
+            dpIncome += 2;
+            cpuCapacity += 20 + (gameState.hubLevel - 1) * 3; // HUB поддерживает 20 CPU на 1 уровне, +3 за апгрейд
         }
+        // Добавляем потенциал от нод с CPU
         for (const id in gameState.nodes) {
             const node = gameState.nodes[id];
             if (node.owner === 'player' && node.program) {
                 const level = node.program.level;
                 if (node.program.type === 'miner') {
-                    // Бонус от hub level: +5% за каждый уровень
                     let baseIncome = 3 * Math.pow(1.8, level - 1);
                     let hubBonus = 1 + (gameState.hubLevel - 1) * 0.05;
-                    
-                    // Налог на высокие уровни miner'ов (уровень 4+)
                     let taxMultiplier = 1.0;
-                    if (level >= 4) {
-                        taxMultiplier = 0.9; // -10% за уровень 4+
-                        if (level >= 6) {
-                            taxMultiplier = 0.8; // -20% за уровень 6+
-                        }
-                    }
-                    
-                    // Применяем эффекты событий
-                    if (gameState.minerTaxActive) {
-                        taxMultiplier *= 0.5; // Налог на майнеры
-                    }
-                    if (gameState.playerBoostActive) {
-                        taxMultiplier *= 1.5; // Бонус игрока
-                    }
-                    
+                    if (level >= 4) taxMultiplier = 0.9;
+                    if (level >= 6) taxMultiplier = 0.8;
+                    if (gameState.minerTaxActive) taxMultiplier *= 0.5;
+                    if (gameState.playerBoostActive) taxMultiplier *= 1.5;
                     dpIncome += baseIncome * hubBonus * taxMultiplier;
                 }
-                if (node.program.type === 'overclocker') cpuIncome += 1 * level;
+                if (node.program.type === 'overclocker') cpuCapacity += 5 * level; // overclocker добавляет потенциал CPU
             }
         }
         gameState.dp += Math.floor(dpIncome);
-        gameState.cpu += Math.floor(cpuIncome);
+        // Устанавливаем потенциал CPU сети
+        gameState.cpu = cpuCapacity;
+        // Управляем активностью программ в зависимости от потенциала
+        let cpuUsed = 0;
+        let cpuPrograms = [];
+        for (const id in gameState.nodes) {
+            const node = gameState.nodes[id];
+            if (node.owner === 'player' && node.program && node.program.isActive !== false) {
+                const cpuUsage = PROGRAM_CPU_USAGE[node.program.type];
+                if (cpuUsage) {
+                    const level = node.program.level || 1;
+                    const actualCpuUsage = typeof cpuUsage === 'function' ? cpuUsage(level) : cpuUsage;
+                    cpuPrograms.push({node, program: node.program, cpuUsage: actualCpuUsage, priority: node.program.type === 'anti_exe' ? 1 : 2});
+                }
+            }
+        }
+        // Сортируем по приоритету (anti_exe — выше)
+        cpuPrograms.sort((a, b) => a.priority - b.priority);
+        for (const entry of cpuPrograms) {
+            if (cpuCapacity - cpuUsed >= entry.cpuUsage) {
+                cpuUsed += entry.cpuUsage;
+                entry.program.isActive = true;
+            } else {
+                entry.program.isActive = false;
+            }
+        }
         gameState.lastMinerTick = 0;
     }
     
@@ -3247,7 +3395,7 @@ function update(dt, now) {
             const node = gameState.nodes[enemy.currentNodeId];
             if (node && node.owner === 'player' && !godMode) {
                 let damage = 30 * dt;
-                if (node.program?.type !== 'sentry') {
+                if (node.program?.type !== 'sentry' || node.program?.isActive === false) {
                     node.captureProgress -= 0.3 * dt;
                     if (node.captureProgress <= 0) {
                         node.owner = 'neutral'; node.program = null; node.captureProgress = 0;
@@ -3373,7 +3521,7 @@ function startNewGame() {
     fixEdgeIntersectionsAndReconnect(gameState.nodes);
     attachTailsToNetwork(gameState.nodes);
     gameState.dp = 100;
-    gameState.cpu = 50;
+    gameState.cpu = 0; // Убираем стартовое значение CPU
     gameState.traceLevel = 0;
     gameState.enemies = [];
     gameState.selectedNodeId = null;
@@ -3670,11 +3818,9 @@ document.addEventListener('DOMContentLoaded', () => {
                                                 node.program.level <= 5 ? node.program.level * 1.5 : 
                                                 node.program.level * 2; // Для уровня 6+ двойная стоимость
                             let cost = baseCost * levelMultiplier;
-                            let cpuCost = 5 * node.program.level;
                             // За один уровень hub можно апгрейдить два раза, но максимальный уровень 6
-                            if (gameState.dp >= cost && gameState.cpu >= cpuCost && node.program.level < Math.min(6, gameState.hubLevel * 2)) {
+                            if (gameState.dp >= cost && node.program.level < Math.min(6, gameState.hubLevel * 2)) {
                                 gameState.dp -= cost;
-                                gameState.cpu -= cpuCost;
                                 node.program.level++;
                                 sound.play('upgrade');
                                 addGameLog(`Апгрейд ${node.program.type} до уровня ${node.program.level}`, 'success');
@@ -3688,8 +3834,8 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (node && node.type === 'hub') {
                             // --- Стоимость апгрейда HUB: увеличенная ---
                             let cost = 50 * gameState.hubLevel; // Увеличено с 35 до 50
-                            if (gameState.cpu >= cost) {
-                                gameState.cpu -= cost;
+                            if (gameState.dp >= cost) {
+                                gameState.dp -= cost;
                                 gameState.hubLevel++;
                                 sound.play('upgrade');
                                 addGameLog(`Hub апгрейден до уровня ${gameState.hubLevel}`, 'success');
@@ -3701,10 +3847,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     if ((key === 'miner' || key === 'anti_exe' || key === 'sentry') && gameState.selectedNodeId) {
                         const node = gameState.nodes[gameState.selectedNodeId];
                         if (node && !node.program && node.owner === 'player') {
-                            let cost = key === 'miner' ? 13 : key === 'anti_exe' ? 20 : 27; // Уменьшено в 1.5 раза
+                            let cost = key === 'miner' ? 13 : key === 'anti_exe' ? 20 : 13; // Исправлена стоимость sentry
                             if (gameState.dp >= cost) {
                                 gameState.dp -= cost;
-                                node.program = { type: key, level: 1 };
+                                node.program = { type: key, level: 1, isActive: true };
                                 addGameLog(`Построен ${key} на ноде ${node.id}`, 'success');
                                 gameState.selectedNodeId = null;
                                 return;
@@ -3715,12 +3861,11 @@ document.addEventListener('DOMContentLoaded', () => {
                         const node = gameState.nodes[gameState.selectedNodeId];
                         if (node && node.type === 'cpu_node' && node.owner === 'player') {
                             if (gameState.dp >= 50) {
-                                            gameState.dp -= 50;
-                            node.program = { type: 'overclocker', level: 1 };
-                            gameState.cpu += 30;
-                            addGameLog('Построен Overclocker', 'success');
-                            gameState.selectedNodeId = null;
-                            return;
+                                gameState.dp -= 50;
+                                node.program = { type: 'overclocker', level: 1, isActive: true };
+                                addGameLog('Построен Overclocker', 'success');
+                                gameState.selectedNodeId = null;
+                                return;
                             }
                         }
                     }
@@ -4337,15 +4482,18 @@ function updateEnemyBehaviors(dt, now) {
                     if (alternativePath && alternativePath.length > 0) {
                         enemy.path = alternativePath;
                         enemy.pathStep = 0;
-                        if (!enemy.isBypassingThreat) {
+                        // Антиспам: лог только если враг начал новый обход угрозы
+                        const nowSec = Math.floor(performance.now() / 1000);
+                        if (!enemy.lastBypassThreatLogTime || enemy.lastBypassThreatLogTime !== nowSec) {
                             addGameLog(`🔄 ${enemy.name || 'Враг'} обходит угрозу`, 'info');
-                            enemy.isBypassingThreat = true;
+                            enemy.lastBypassThreatLogTime = nowSec;
                         }
+                        enemy.isBypassingThreat = true;
                     }
                 } else {
-                    // Если враг больше не обходит угрозу, сбрасываем флаг
                     if (enemy.isBypassingThreat) {
                         enemy.isBypassingThreat = false;
+                        enemy.lastBypassThreatLogTime = undefined;
                     }
                 }
             }
@@ -4520,7 +4668,7 @@ const HINT_SYSTEM = {
         strategy: [
             '🎯 Создайте оборонительный периметр',
             '🎯 Используйте ANTI.EXE для контроля',
-            '🎯 Развивайте экономику постепенно',
+            '�� Развивайте экономику постепенно',
             '🎯 Апгрейдите Hub для бонусов',
             '🎯 Следите за волнами врагов'
         ],
@@ -4825,6 +4973,73 @@ if (networkBreakAlert.active) {
     }
 }
 // ... existing code ...
+
+// Функция управления активностью программ в зависимости от доступного CPU
+function manageProgramActivity() {
+    // Собираем все активные программы, требующие CPU
+    const cpuPrograms = [];
+    for (const id in gameState.nodes) {
+        const node = gameState.nodes[id];
+        if (node.owner === 'player' && node.program && node.program.isActive !== false) {
+            const cpuUsage = PROGRAM_CPU_USAGE[node.program.type];
+            if (cpuUsage) {
+                const level = node.program.level || 1;
+                const actualCpuUsage = typeof cpuUsage === 'function' ? cpuUsage(level) : cpuUsage;
+                cpuPrograms.push({
+                    nodeId: id,
+                    program: node.program,
+                    cpuUsage: actualCpuUsage,
+                    priority: node.program.type === 'anti_exe' ? 1 : 2 // anti_exe имеет приоритет
+                });
+            }
+        }
+    }
+    
+    // Сортируем по приоритету (сначала anti_exe, потом sentry)
+    cpuPrograms.sort((a, b) => a.priority - b.priority);
+    
+    // Рассчитываем общий расход CPU
+    let totalCpuUsage = 0;
+    for (const prog of cpuPrograms) {
+        totalCpuUsage += prog.cpuUsage;
+    }
+    
+    // Если расход превышает доступный CPU, отключаем программы
+    if (totalCpuUsage > gameState.cpu) {
+        let remainingCpu = gameState.cpu;
+        let deactivatedPrograms = [];
+        
+        for (const prog of cpuPrograms) {
+            if (remainingCpu >= prog.cpuUsage) {
+                remainingCpu -= prog.cpuUsage;
+                // Программа остается активной
+                if (!prog.program.isActive) {
+                    prog.program.isActive = true;
+                    addGameLog(`${prog.program.type} реактивирован`, 'success');
+                }
+            } else {
+                // Отключаем программу
+                if (prog.program.isActive !== false) {
+                    prog.program.isActive = false;
+                    deactivatedPrograms.push(prog.program.type);
+                }
+            }
+        }
+        
+        // Логируем отключенные программы
+        if (deactivatedPrograms.length > 0) {
+            addGameLog(`${deactivatedPrograms.join(', ')} деактивирован из-за нехватки CPU`, 'warning');
+        }
+    } else {
+        // Если CPU хватает, активируем все программы
+        for (const prog of cpuPrograms) {
+            if (!prog.program.isActive) {
+                prog.program.isActive = true;
+                addGameLog(`${prog.program.type} реактивирован`, 'success');
+            }
+        }
+    }
+}
 
 
  
