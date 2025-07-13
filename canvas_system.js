@@ -18,15 +18,238 @@ let gameState = {
     win: false,
     phase: 'MENU', // FSM: 'MENU', 'PLAYING', 'END_SCREEN'
     hubLevel: 1,
+    // Новые переменные для системы волн и событий
+    currentWave: 1,
+    waveEnemiesSpawned: 0,
+    waveEnemiesTotal: 5,
+    waveTimer: 0,
+    waveBreakTimer: 0,
+    isWaveBreak: false,
+    waveBreakDuration: 10, // секунды между волнами
+    randomEvents: [],
+    activeEvents: [],
+    lastEventCheck: 0,
+    eventCheckInterval: 30, // проверка событий каждые 30 секунд
+    achievementPoints: 0,
+    comboKills: 0,
+    lastKillTime: 0,
+    comboTimeout: 3000 // 3 секунды для комбо
 };
 let uiButtons = {};
-let visualEffects = { sentryShots: [], sentryFlashes: [], enemyExplosions: [], teleportEffects: [], tankRamEffects: [], comboEffects: [] };
+let visualEffects = { 
+    sentryShots: [], 
+    sentryFlashes: [], 
+    enemyExplosions: [], 
+    teleportEffects: [], 
+    tankRamEffects: [], 
+    comboEffects: [],
+    achievementEffects: [], // Новые эффекты для достижений
+    hubUpgradeEffects: [],  // Эффекты апгрейда Hub
+    taxEffects: [],         // Эффекты налога на miner'ы
+    waveEffects: [],        // Эффекты волн
+    eventEffects: []        // Эффекты случайных событий
+};
 let gameLogs = [];
 let gameStats = {
     enemiesKilled: 0,
     nodesCaptured: 0,
-    startTime: Date.now()
+    startTime: Date.now(),
+    wavesCompleted: 0,
+    maxCombo: 0,
+    totalDamageDealt: 0,
+    totalDamageTaken: 0,
+    achievements: {
+        masterMiner: false,      // 10 miner'ов уровня 3+
+        networkDefender: false,   // 5 sentry уровня 2+
+        enemyHunter: false,       // 50 убийств
+        hubMaster: false,         // Hub уровня 5+
+        antiExeMaster: false,     // 3 ANTI.EXE одновременно
+        longSurvivor: false,      // 20 минут игры
+        waveMaster: false,        // 10 волн подряд
+        comboMaster: false,       // Комбо из 10 убийств
+        eventSurvivor: false,     // Пережить 5 случайных событий
+        perfectWave: false        // Волна без потерь
+    }
 };
+
+// Система волн врагов
+const WAVE_CONFIG = {
+    1: { enemies: 5, types: ['patrol'], difficulty: 1.0 },
+    2: { enemies: 7, types: ['patrol', 'hunter'], difficulty: 1.2 },
+    3: { enemies: 8, types: ['patrol', 'hunter', 'infector'], difficulty: 1.4 },
+    4: { enemies: 10, types: ['hunter', 'infector', 'blitzer'], difficulty: 1.6 },
+    5: { enemies: 12, types: ['hunter', 'infector', 'blitzer', 'tank'], difficulty: 1.8 },
+    6: { enemies: 15, types: ['hunter', 'infector', 'blitzer', 'tank', 'saboteur', 'shield'], difficulty: 2.0 },
+    7: { enemies: 18, types: ['hunter', 'infector', 'blitzer', 'tank', 'saboteur', 'bomber', 'emp'], difficulty: 2.3 },
+    8: { enemies: 20, types: ['hunter', 'infector', 'blitzer', 'tank', 'saboteur', 'bomber', 'stealth', 'swarm'], difficulty: 2.6 },
+    9: { enemies: 25, types: ['hunter', 'infector', 'blitzer', 'tank', 'saboteur', 'bomber', 'stealth', 'healer', 'juggernaut'], difficulty: 3.0 },
+    10: { enemies: 30, types: ['hunter', 'infector', 'blitzer', 'tank', 'saboteur', 'bomber', 'stealth', 'healer', 'commander', 'shield', 'emp'], difficulty: 3.5 }
+};
+
+// Система случайных событий
+const RANDOM_EVENTS = [
+    {
+        id: 'enemy_boost',
+        name: 'Усиление врагов',
+        description: 'Враги получают +50% здоровья и +30% урона на 30 секунд',
+        duration: 30,
+        effect: (gameState) => {
+            gameState.enemies.forEach(enemy => {
+                enemy.health *= 1.5;
+                enemy.damageMultiplier = (enemy.damageMultiplier || 1) * 1.3;
+            });
+            addGameLog('⚠️ Враги усилены!', 'warning');
+            visualEffects.eventEffects.push({
+                type: 'enemy_boost',
+                time: performance.now(),
+                duration: 30
+            });
+        }
+    },
+    {
+        id: 'player_boost',
+        name: 'Бонус игрока',
+        description: '+100 DP, +50 CPU, все программы работают на 150%',
+        duration: 20,
+        effect: (gameState) => {
+            gameState.dp += 100;
+            gameState.cpu += 50;
+            gameState.playerBoostActive = true;
+            gameState.playerBoostEnd = performance.now() + 20000;
+            addGameLog('🎁 Бонус получен!', 'success');
+            visualEffects.eventEffects.push({
+                type: 'player_boost',
+                time: performance.now(),
+                duration: 20
+            });
+        }
+    },
+    {
+        id: 'miner_tax',
+        name: 'Налог на майнеры',
+        description: 'Все miner\'ы работают на 50% эффективности на 15 секунд',
+        duration: 15,
+        effect: (gameState) => {
+            gameState.minerTaxActive = true;
+            gameState.minerTaxEnd = performance.now() + 15000;
+            addGameLog('💰 Налог на майнеры!', 'warning');
+            visualEffects.eventEffects.push({
+                type: 'miner_tax',
+                time: performance.now(),
+                duration: 15
+            });
+        }
+    },
+    {
+        id: 'sentry_overcharge',
+        name: 'Перегрузка турелей',
+        description: 'Sentry стреляют в 3 раза быстрее на 10 секунд',
+        duration: 10,
+        effect: (gameState) => {
+            gameState.sentryOverchargeActive = true;
+            gameState.sentryOverchargeEnd = performance.now() + 10000;
+            addGameLog('⚡ Турели перегружены!', 'success');
+            visualEffects.eventEffects.push({
+                type: 'sentry_overcharge',
+                time: performance.now(),
+                duration: 10
+            });
+        }
+    },
+    {
+        id: 'hub_vulnerability',
+        name: 'Уязвимость Hub',
+        description: 'Hub получает двойной урон на 20 секунд',
+        duration: 20,
+        effect: (gameState) => {
+            gameState.hubVulnerabilityActive = true;
+            gameState.hubVulnerabilityEnd = performance.now() + 20000;
+            addGameLog('⚠️ Hub уязвим!', 'warning');
+            visualEffects.eventEffects.push({
+                type: 'hub_vulnerability',
+                time: performance.now(),
+                duration: 20
+            });
+        }
+    }
+];
+
+// Новые типы врагов с улучшенным поведением
+const ENEMY_BEHAVIORS = {
+    'saboteur': {
+        name: '🛠️ Саботажник',
+        health: 60,
+        speed: 1.2,
+        targetPriority: ['miner', 'overclocker', 'hub'],
+        special: 'disables_programs',
+        description: 'Отключает программы на нодах'
+    },
+    'bomber': {
+        name: '💣 Бомбардировщик',
+        health: 80,
+        speed: 0.8,
+        targetPriority: ['hub', 'sentry'],
+        special: 'explodes_on_death',
+        description: 'Взрывается при смерти, нанося урон соседним нодам'
+    },
+    'stealth': {
+        name: '👻 Стелс',
+        health: 40,
+        speed: 1.5,
+        targetPriority: ['miner', 'hub'],
+        special: 'invisible_to_sentry',
+        description: 'Невидим для Sentry, может проходить незамеченным'
+    },
+    'healer': {
+        name: '💚 Лекарь',
+        health: 100,
+        speed: 0.7,
+        targetPriority: ['enemy_healing'],
+        special: 'heals_other_enemies',
+        description: 'Лечит других врагов'
+    },
+    'commander': {
+        name: '👑 Командир',
+        health: 150,
+        speed: 0.9,
+        targetPriority: ['hub'],
+        special: 'boosts_other_enemies',
+        description: 'Усиливает других врагов в радиусе'
+    },
+    'shield': {
+        name: '🛡️ Щитоносец',
+        health: 120,
+        speed: 0.6,
+        targetPriority: ['hub'],
+        special: 'blocks_sentry_shots',
+        description: 'Блокирует выстрелы Sentry для других врагов'
+    },
+    'juggernaut': {
+        name: '⚔️ Джаггернаут',
+        health: 200,
+        speed: 0.5,
+        targetPriority: ['sentry', 'hub'],
+        special: 'high_armor_piercing',
+        description: 'Высокая броня, пробивает оборону'
+    },
+    'swarm': {
+        name: '🐝 Рой',
+        health: 30,
+        speed: 2.0,
+        targetPriority: ['miner', 'hub'],
+        special: 'swarm_attack',
+        description: 'Атакует роем, обходит Sentry'
+    },
+    'emp': {
+        name: '⚡ ЭМИ',
+        health: 70,
+        speed: 1.0,
+        targetPriority: ['sentry', 'hub'],
+        special: 'disables_sentry',
+        description: 'Временно отключает Sentry'
+    }
+};
+
 let screenShake = { duration: 0, magnitude: 0 };
 let godMode = false;
 let lastTimestamp = 0;
@@ -34,10 +257,18 @@ let lastHint = '';
 let hoveredNodeId = null;
 
 // --- CANVAS NETWORK SYSTEM ---
-const canvas = document.getElementById('canvas');
-const ctx = canvas.getContext('2d');
+let canvas, ctx;
+
+// В начало initCanvas
+function initCanvas() {
+    canvas = document.getElementById('canvas');
+    if (canvas) {
+        ctx = canvas.getContext('2d');
+    }
+}
 // Адаптивный размер canvas
 function resizeCanvas() {
+    if (!canvas) return;
     const container = document.getElementById('game-area');
     if (container) {
         const rect = container.getBoundingClientRect();
@@ -49,10 +280,12 @@ function resizeCanvas() {
     }
 }
 
-resizeCanvas();
+// resizeCanvas() будет вызван после инициализации canvas
 window.addEventListener('resize', () => {
-    resizeCanvas();
-    render();
+    if (canvas) {
+        resizeCanvas();
+        render();
+    }
 });
 
 // --- Node Class ---
@@ -89,43 +322,75 @@ class Enemy {
         this.decapturing = false;
         this.type = type;
         
-        // Настройки здоровья для разных типов врагов
-        switch(type) {
-            case 'hunter':
-                this.health = 90;
-                this.speed = 1.0;
-                break;
-            case 'patrol':
-                this.health = 50;
-                this.speed = 1.0;
-                break;
-            case 'infector':
-                this.health = 40;
-                this.speed = 0.8;
-                this.infectionRadius = 150;
-                this.infectionDamage = 2;
-                break;
-            case 'blitzer':
-                this.health = 30;
-                this.speed = 2.5;
-                this.teleportCooldown = 0;
-                this.teleportRange = 200;
-                break;
-            case 'tank':
-                this.health = 200;
-                this.speed = 0.8;
-                this.armor = 0.7; // Снижение урона на 30%
-                this.ramDamage = 50;
-                break;
-            default:
-                this.health = 50;
-                this.speed = 1.0;
+        // Получаем настройки из ENEMY_BEHAVIORS или используем стандартные
+        const behavior = ENEMY_BEHAVIORS[type];
+        if (behavior) {
+            this.health = behavior.health;
+            this.speed = behavior.speed;
+            this.targetPriority = behavior.targetPriority;
+            this.special = behavior.special;
+            this.name = behavior.name;
+        } else {
+            // Стандартные настройки для существующих типов
+            switch(type) {
+                case 'hunter':
+                    this.health = 90;
+                    this.speed = 1.0;
+                    this.targetPriority = ['miner', 'hub'];
+                    break;
+                case 'patrol':
+                    this.health = 50;
+                    this.speed = 1.0;
+                    this.targetPriority = ['hub'];
+                    break;
+                case 'infector':
+                    this.health = 40;
+                    this.speed = 0.8;
+                    this.infectionRadius = 150;
+                    this.infectionDamage = 2;
+                    this.targetPriority = ['miner', 'hub'];
+                    break;
+                case 'blitzer':
+                    this.health = 30;
+                    this.speed = 2.5;
+                    this.teleportCooldown = 0;
+                    this.teleportRange = 200;
+                    this.targetPriority = ['hub', 'sentry'];
+                    break;
+                case 'tank':
+                    this.health = 300;
+                    this.speed = 0.8;
+                    this.armor = 0.5;
+                    this.ramDamage = 50;
+                    this.targetPriority = ['hub', 'sentry'];
+                    break;
+                default:
+                    this.health = 50;
+                    this.speed = 1.0;
+                    this.targetPriority = ['hub'];
+            }
         }
         
         // Дополнительные свойства
         this.lastMove = 0;
         this.isStunnedUntil = 0;
         this.armor = this.armor || 1.0;
+        this.damageMultiplier = 1.0;
+        this.isInvisible = type === 'stealth';
+        this.lastHealTime = 0;
+        this.healCooldown = 5000; // 5 секунд между исцелениями
+        this.boostRadius = 150; // Радиус усиления для командира
+        this.maxHealth = this.health; // Сохраняем максимальное здоровье
+        
+        // Новые свойства для противодействия
+        this.shieldActive = type === 'shield';
+        this.shieldRadius = 80; // Радиус щита
+        this.empActive = false;
+        this.empEndTime = 0;
+        this.swarmCount = type === 'swarm' ? 3 : 1; // Количество в рое
+        this.piercingDamage = type === 'juggernaut' ? 2.0 : 1.0; // Пробитие брони
+        this.armorType = type === 'juggernaut' ? 'heavy' : 
+                         type === 'shield' ? 'medium' : 'light';
     }
 }
 
@@ -145,6 +410,7 @@ function angleBetweenEdges(ax, ay, bx, by, cx, cy) {
 }
 
 function generateCanvasNetwork() {
+    if (!canvas) return {};
     const width = canvas.width, height = canvas.height;
     const nodes = [];
     nodes.push(new Node(Math.random() * (width - 200) + 100, Math.random() * (height - 200) + 100, 'hub', 'hub'));
@@ -439,6 +705,7 @@ function triggerScreenShake(magnitude, duration) {
 }
 
 window.addEventListener('keydown', (e) => {
+    if (!gameState) return;
     if (e.key === 'g' || e.key === 'G') {
         godMode = !godMode;
         alert('God Mode: ' + (godMode ? 'ON' : 'OFF'));
@@ -454,201 +721,9 @@ window.addEventListener('keydown', (e) => {
     }
 });
 
-canvas.addEventListener('mousemove', function(e) {
-    const rect = canvas.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
-    hoveredNodeId = null;
-    for (const id in gameState.nodes) {
-        const node = gameState.nodes[id];
-        let base = node.type === 'hub' ? 36 : 18;
-        let amp = node.type === 'hub' ? 6 : 1.5;
-        let freq = node.type === 'hub' ? 1.5 : 0.7;
-        let phase = node.randomPhase || 0;
-        let time = performance.now() / 1000;
-        let size = base + Math.sin(time * freq + phase) * amp;
-        if ((mx - node.x) ** 2 + (my - node.y) ** 2 < size * size) {
-            hoveredNodeId = id;
-            break;
-        }
-    }
-    // Сброс анимации пути, если наведённая нода изменилась
-    if (hoveredNodeId !== pathAnim.hovered) {
-        pathAnim.hovered = hoveredNodeId;
-        pathAnim.startTime = performance.now();
-        pathAnim.path = null;
-    }
-});
-
-canvas.addEventListener('click', function(e) {
-    const rect = canvas.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
-    // --- END_SCREEN ---
-    if (gameState.phase === 'END_SCREEN') {
-        // Play Again кнопка
-        const x = canvas.width/2-80, y = canvas.height/2+30, w = 160, h = 44;
-        if (mx >= x && mx <= x+w && my >= y && my <= y+h) {
-            gameState.phase = 'MENU';
-            return;
-        }
-    }
-    // --- MENU ---
-    if (gameState.phase === 'MENU') {
-        // Start New Game кнопка
-        const x = canvas.width/2-90, y = canvas.height/2+60, w = 180, h = 48;
-        if (mx >= x && mx <= x+w && my >= y && my <= y+h) {
-            startNewGame();
-            gameState.phase = 'PLAYING';
-            return;
-        }
-    }
-    // --- PLAYING ---
-    if (gameState.phase !== 'PLAYING') return;
-    // EMP Blast
-    if (uiButtons['emp']) {
-        const b = uiButtons['emp'];
-        if (mx >= b.x && mx <= b.x+b.w && my >= b.y && my <= b.y+b.h) {
-            if (gameState.cpu >= 50 && gameState.empCooldown <= 0) {
-                gameState.cpu -= 50;
-                gameState.empCooldown = 8000;
-                for (const enemy of gameState.enemies) {
-                    enemy.isStunnedUntil = performance.now() + 3500;
-                }
-                return;
-            }
-        }
-    }
-    // UI-кнопки программ
-    for (const key in uiButtons) {
-        const b = uiButtons[key];
-        if (mx >= b.x && mx <= b.x+b.w && my >= b.y && my <= b.y+b.h) {
-            if (key === 'upgrade' && gameState.selectedNodeId) {
-                const node = gameState.nodes[gameState.selectedNodeId];
-                if (node && node.program) {
-                    let baseCost = node.program.type === 'miner' ? 13 : node.program.type === 'anti_exe' ? 20 : 27; // Уменьшено в 1.5 раза
-                    // Прогрессивная стоимость: множитель увеличивается с уровнем
-                    let levelMultiplier = node.program.level <= 3 ? node.program.level : 
-                                        node.program.level <= 5 ? node.program.level * 1.5 : 
-                                        node.program.level * 2; // Для уровня 6+ двойная стоимость
-                    let cost = baseCost * levelMultiplier;
-                    let cpuCost = 5 * node.program.level;
-                    // За один уровень hub можно апгрейдить два раза, но максимальный уровень 6
-                    if (gameState.dp >= cost && gameState.cpu >= cpuCost && node.program.level < Math.min(6, gameState.hubLevel * 2)) {
-                        gameState.dp -= cost;
-                        gameState.cpu -= cpuCost;
-                        node.program.level++;
-                        sound.play('upgrade');
-                        addGameLog(`Апгрейд ${node.program.type} до уровня ${node.program.level}`, 'success');
-                        gameState.selectedNodeId = null;
-                        return;
-                    }
-                }
-            }
-            if (key === 'upgrade_hub' && gameState.selectedNodeId) {
-                const node = gameState.nodes[gameState.selectedNodeId];
-                if (node && node.type === 'hub') {
-                    // --- Стоимость апгрейда HUB: ручной UX-тест ---
-                    let cost = 35 * gameState.hubLevel; // Уменьшено с 45 до 35
-                    if (gameState.cpu >= cost) {
-                        gameState.cpu -= cost;
-                        gameState.hubLevel++;
-                        sound.play('upgrade');
-                        addGameLog(`Hub апгрейден до уровня ${gameState.hubLevel}`, 'success');
-                        gameState.selectedNodeId = null;
-                        return;
-                    }
-                }
-            }
-            if ((key === 'miner' || key === 'anti_exe' || key === 'sentry') && gameState.selectedNodeId) {
-                const node = gameState.nodes[gameState.selectedNodeId];
-                if (node && !node.program && node.owner === 'player') {
-                    let cost = key === 'miner' ? 13 : key === 'anti_exe' ? 20 : 27; // Уменьшено в 1.5 раза
-                    if (gameState.dp >= cost) {
-                        gameState.dp -= cost;
-                        node.program = { type: key, level: 1 };
-                        addGameLog(`Построен ${key} на ноде ${node.id}`, 'success');
-                        gameState.selectedNodeId = null;
-                        return;
-                    }
-                }
-            }
-            if (key === 'overclocker' && gameState.selectedNodeId) {
-                const node = gameState.nodes[gameState.selectedNodeId];
-                if (node && node.type === 'cpu_node' && node.owner === 'player') {
-                    if (gameState.dp >= 50) {
-                                            gameState.dp -= 50;
-                    node.program = { type: 'overclocker', level: 1 };
-                    gameState.cpu += 30;
-                    addGameLog('Построен Overclocker', 'success');
-                    gameState.selectedNodeId = null;
-                    return;
-                    }
-                }
-            }
-        }
-    }
-    // --- Захват/выделение ноды ---
-    let found = false;
-    for (const id in gameState.nodes) {
-        const node = gameState.nodes[id];
-        let base = node.type === 'hub' ? 36 : 18;
-        let amp = node.type === 'hub' ? 6 : 1.5;
-        let freq = node.type === 'hub' ? 1.5 : 0.7;
-        let phase = node.randomPhase || 0;
-        let time = performance.now() / 1000;
-        let size = base + Math.sin(time * freq + phase) * amp;
-        let dx = mx - node.x, dy = my - node.y;
-        if (dx*dx + dy*dy <= (size+8)*(size+8)) {
-            // Если клик по своей — просто выделяем
-            if (node.owner === 'player') {
-                gameState.selectedNodeId = id;
-                found = true;
-                break;
-            }
-            // Если клик по нейтральной/вражеской, и есть сосед-союзник — захват
-            if ((node.owner !== 'player' && !node.isCapturing)) {
-                let hasPlayerNeighbor = node.neighbors.some(nid => gameState.nodes[nid] && gameState.nodes[nid].owner === 'player');
-                if (hasPlayerNeighbor && gameState.dp >= 10) {
-                    node.isCapturing = true;
-                    node.captureProgress = 0;
-                    gameState.dp -= 10;
-                    sound.play('capture_start');
-                    addGameLog(`Начат захват ноды ${id}`, 'info');
-                    gameState.selectedNodeId = id;
-                    found = true;
-                    break;
-                }
-            }
-            // В остальных случаях — просто выделяем
-            gameState.selectedNodeId = id;
-            found = true;
-            break;
-        }
-    }
-    if (!found) gameState.selectedNodeId = null;
-});
-
-function findPathBFS(nodesObj, startId, endId) {
-    if (!startId || !endId) return null;
-    const queue = [[startId]];
-    const visited = new Set([startId]);
-    while (queue.length) {
-        const path = queue.shift();
-        const last = path[path.length - 1];
-        if (last === endId) return path;
-        for (const neighbor of nodesObj[last].neighbors) {
-            if (!visited.has(neighbor)) {
-                visited.add(neighbor);
-                queue.push([...path, neighbor]);
-            }
-        }
-    }
-    return null;
-}
-
 // --- RENDERING FUNCTIONS ---
 function drawConnection(ctx, n1, n2, time) {
+    if (!canvas || !ctx || !n1 || !n2) return;
     let sameOwner = n1.owner === n2.owner && n1.owner !== 'neutral';
     let color, shadow;
     if (sameOwner && n1.owner === 'player') { color = '#ff9100'; shadow = '#ffb347'; }
@@ -673,6 +748,7 @@ function drawConnection(ctx, n1, n2, time) {
 }
 
 function drawEnemy(ctx, node, type, enemy) {
+    if (!canvas || !ctx || !node) return;
     ctx.save();
     
     // Рисуем основную форму врага в зависимости от типа
@@ -691,6 +767,33 @@ function drawEnemy(ctx, node, type, enemy) {
             break;
         case 'tank':
             drawTankIcon(ctx, node.x, node.y);
+            break;
+        case 'saboteur':
+            drawSaboteurIcon(ctx, node.x, node.y);
+            break;
+        case 'bomber':
+            drawBomberIcon(ctx, node.x, node.y);
+            break;
+        case 'stealth':
+            drawStealthIcon(ctx, node.x, node.y);
+            break;
+        case 'healer':
+            drawHealerIcon(ctx, node.x, node.y);
+            break;
+        case 'commander':
+            drawCommanderIcon(ctx, node.x, node.y);
+            break;
+        case 'shield':
+            drawShieldIcon(ctx, node.x, node.y);
+            break;
+        case 'juggernaut':
+            drawJuggernautIcon(ctx, node.x, node.y);
+            break;
+        case 'swarm':
+            drawSwarmIcon(ctx, node.x, node.y);
+            break;
+        case 'emp':
+            drawEmpIcon(ctx, node.x, node.y);
             break;
         default:
             // Стандартная отрисовка для неизвестных типов
@@ -725,6 +828,60 @@ function drawEnemy(ctx, node, type, enemy) {
             ctx.lineTo(node.x + Math.cos(angle) * r2, node.y + Math.sin(angle) * r2);
             ctx.stroke();
         }
+        ctx.restore();
+    }
+    
+    // Специальные эффекты для новых типов врагов
+    if (type === 'stealth') {
+        // Эффект стелса - полупрозрачность
+        ctx.save();
+        ctx.globalAlpha = 0.6;
+        ctx.strokeStyle = '#FFFFFF';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([5, 5]);
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, 15, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+    }
+    
+    if (type === 'commander') {
+        // Аура командования
+        ctx.save();
+        ctx.strokeStyle = '#FFD700';
+        ctx.lineWidth = 2;
+        ctx.globalAlpha = 0.3;
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, 25, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+    }
+    
+    if (type === 'healer') {
+        // Эффект исцеления
+        ctx.save();
+        ctx.strokeStyle = '#32CD32';
+        ctx.lineWidth = 2;
+        ctx.globalAlpha = 0.4;
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, 20, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+    }
+    
+    // Полоска здоровья для всех врагов
+    if (enemy && enemy.health < enemy.maxHealth) {
+        const healthPercent = enemy.health / enemy.maxHealth;
+        const barWidth = 20;
+        const barHeight = 3;
+        
+        ctx.save();
+        ctx.fillStyle = '#333';
+        ctx.fillRect(node.x - barWidth/2, node.y - 20, barWidth, barHeight);
+        
+        ctx.fillStyle = healthPercent > 0.5 ? '#00ff00' : healthPercent > 0.25 ? '#ffff00' : '#ff0000';
+        ctx.fillRect(node.x - barWidth/2, node.y - 20, barWidth * healthPercent, barHeight);
         ctx.restore();
     }
     
@@ -777,7 +934,17 @@ function drawPatrolIcon(ctx, x, y) {
     ctx.shadowColor = '#9C27B0';
     ctx.shadowBlur = 12;
     ctx.beginPath();
-    ctx.roundRect(x-10, y-10, 20, 20, 4);
+    // Рисуем скругленный квадрат
+    ctx.moveTo(x-6, y-10);
+    ctx.lineTo(x+6, y-10);
+    ctx.quadraticCurveTo(x+10, y-10, x+10, y-6);
+    ctx.lineTo(x+10, y+6);
+    ctx.quadraticCurveTo(x+10, y+10, x+6, y+10);
+    ctx.lineTo(x-6, y+10);
+    ctx.quadraticCurveTo(x-10, y+10, x-10, y+6);
+    ctx.lineTo(x-10, y-6);
+    ctx.quadraticCurveTo(x-10, y-10, x-6, y-10);
+    ctx.closePath();
     ctx.fill();
     
     // Символ "P" в центре
@@ -897,114 +1064,599 @@ function drawBlitzerIcon(ctx, x, y) {
 
 function drawTankIcon(ctx, x, y) {
     ctx.save();
-    // Основной корпус - серый прямоугольник с градиентом
-    const gradient = ctx.createLinearGradient(x-12, y, x+12, y);
-    gradient.addColorStop(0, '#757575');
-    gradient.addColorStop(1, '#424242');
     
-    ctx.fillStyle = gradient;
-    ctx.shadowColor = '#757575';
-    ctx.shadowBlur = 8;
-    ctx.fillRect(x-12, y-8, 24, 16);
+    // Основной корпус танка
+    ctx.fillStyle = '#8B4513';
+    ctx.fillRect(x - 12, y - 8, 24, 16);
     
-    // Символ "T" в центре
-    ctx.fillStyle = '#FFFFFF';
-    ctx.shadowBlur = 0;
-    ctx.font = 'bold 14px Arial';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('T', x, y);
+    // Башня
+    ctx.fillStyle = '#654321';
+    ctx.fillRect(x - 8, y - 12, 16, 8);
     
-    // Броневые полосы
-    ctx.strokeStyle = '#616161';
+    // Гусеницы
+    ctx.fillStyle = '#2F2F2F';
+    ctx.fillRect(x - 14, y - 6, 28, 4);
+    
+    // Дуло
+    ctx.fillStyle = '#1A1A1A';
+    ctx.fillRect(x + 8, y - 2, 8, 4);
+    
+    // Броня (блестящие детали)
+    ctx.strokeStyle = '#DAA520';
     ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(x-8, y-4);
-    ctx.lineTo(x+8, y-4);
-    ctx.moveTo(x-8, y+4);
-    ctx.lineTo(x+8, y+4);
-    ctx.stroke();
-    
-    // Светящиеся датчики по углам
-    const time = performance.now() / 1000;
-    const sensors = [
-        {x: x-8, y: y-6}, {x: x+8, y: y-6},
-        {x: x-8, y: y+6}, {x: x+8, y: y+6}
-    ];
-    
-    sensors.forEach((sensor, i) => {
-        const pulse = Math.sin(time * 3 + i) * 0.5 + 0.5;
-        ctx.globalAlpha = pulse;
-        ctx.fillStyle = '#FF1744';
-        ctx.beginPath();
-        ctx.arc(sensor.x, sensor.y, 2, 0, 2 * Math.PI);
-        ctx.fill();
-    });
+    ctx.strokeRect(x - 10, y - 6, 20, 12);
     
     ctx.restore();
 }
 
-function drawProgramIcon(ctx, node) {
-    if (!node.program) return;
+// Новые функции отрисовки врагов
+function drawSaboteurIcon(ctx, x, y) {
     ctx.save();
-    ctx.font = 'bold 13px sans-serif';
+    
+    // Основная форма саботажника
+    ctx.fillStyle = '#FF6B35';
+    ctx.beginPath();
+    ctx.arc(x, y, 10, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // Инструменты
+    ctx.strokeStyle = '#FFD700';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(x - 8, y - 8);
+    ctx.lineTo(x + 8, y + 8);
+    ctx.moveTo(x + 8, y - 8);
+    ctx.lineTo(x - 8, y + 8);
+    ctx.stroke();
+    
+    // Глаза
+    ctx.fillStyle = '#FF0000';
+    ctx.beginPath();
+    ctx.arc(x - 3, y - 3, 2, 0, Math.PI * 2);
+    ctx.arc(x + 3, y - 3, 2, 0, Math.PI * 2);
+    ctx.fill();
+    
+    ctx.restore();
+}
+
+function drawBomberIcon(ctx, x, y) {
+    ctx.save();
+    
+    // Корпус бомбардировщика
+    ctx.fillStyle = '#FF4500';
+    ctx.beginPath();
+    ctx.ellipse(x, y, 12, 8, 0, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // Бомбы
+    ctx.fillStyle = '#000000';
+    ctx.beginPath();
+    ctx.arc(x - 6, y + 4, 3, 0, Math.PI * 2);
+    ctx.arc(x + 6, y + 4, 3, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // Фитили
+    ctx.strokeStyle = '#FFD700';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x - 6, y + 1);
+    ctx.lineTo(x - 6, y - 3);
+    ctx.moveTo(x + 6, y + 1);
+    ctx.lineTo(x + 6, y - 3);
+    ctx.stroke();
+    
+    // Кабина
+    ctx.fillStyle = '#87CEEB';
+    ctx.beginPath();
+    ctx.arc(x, y - 2, 4, 0, Math.PI * 2);
+    ctx.fill();
+    
+    ctx.restore();
+}
+
+function drawStealthIcon(ctx, x, y) {
+    ctx.save();
+    
+    // Полупрозрачная форма
+    ctx.globalAlpha = 0.6;
+    ctx.fillStyle = '#C0C0C0';
+    ctx.beginPath();
+    ctx.arc(x, y, 10, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // Эффект стелса
+    ctx.strokeStyle = '#FFFFFF';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([5, 5]);
+    ctx.beginPath();
+    ctx.arc(x, y, 12, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    
+    // Глаза
+    ctx.fillStyle = '#00FFFF';
+    ctx.beginPath();
+    ctx.arc(x - 3, y - 3, 2, 0, Math.PI * 2);
+    ctx.arc(x + 3, y - 3, 2, 0, Math.PI * 2);
+    ctx.fill();
+    
+    ctx.restore();
+}
+
+function drawHealerIcon(ctx, x, y) {
+    ctx.save();
+    
+    // Основная форма лекаря
+    ctx.fillStyle = '#32CD32';
+    ctx.beginPath();
+    ctx.arc(x, y, 10, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // Крест медика
+    ctx.strokeStyle = '#FFFFFF';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(x, y - 6);
+    ctx.lineTo(x, y + 6);
+    ctx.moveTo(x - 6, y);
+    ctx.lineTo(x + 6, y);
+    ctx.stroke();
+    
+    // Аура исцеления
+    ctx.strokeStyle = '#90EE90';
+    ctx.lineWidth = 2;
+    ctx.globalAlpha = 0.5;
+    ctx.beginPath();
+    ctx.arc(x, y, 15, 0, Math.PI * 2);
+    ctx.stroke();
+    
+    ctx.restore();
+}
+
+function drawCommanderIcon(ctx, x, y) {
+    ctx.save();
+    
+    // Корона командира
+    ctx.fillStyle = '#FFD700';
+    ctx.beginPath();
+    ctx.moveTo(x - 8, y + 4);
+    ctx.lineTo(x - 4, y - 4);
+    ctx.lineTo(x, y + 2);
+    ctx.lineTo(x + 4, y - 4);
+    ctx.lineTo(x + 8, y + 4);
+    ctx.closePath();
+    ctx.fill();
+    
+    // Основная форма
+    ctx.fillStyle = '#4169E1';
+    ctx.beginPath();
+    ctx.arc(x, y, 10, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // Звезды ранга
+    ctx.fillStyle = '#FFFFFF';
+    ctx.beginPath();
+    ctx.arc(x - 4, y - 2, 1.5, 0, Math.PI * 2);
+    ctx.arc(x + 4, y - 2, 1.5, 0, Math.PI * 2);
+    ctx.arc(x, y + 4, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // Аура командования
+    ctx.strokeStyle = '#FFD700';
+    ctx.lineWidth = 2;
+    ctx.globalAlpha = 0.4;
+    ctx.beginPath();
+    ctx.arc(x, y, 18, 0, Math.PI * 2);
+    ctx.stroke();
+    
+    ctx.restore();
+}
+
+// Новые функции отрисовки для противодействующих врагов
+function drawShieldIcon(ctx, x, y) {
+    ctx.save();
+    
+    // Основная форма щитоносца
+    ctx.fillStyle = '#4A90E2';
+    ctx.beginPath();
+    ctx.arc(x, y, 12, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // Щит
+    ctx.strokeStyle = '#FFFFFF';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(x - 8, y - 8);
+    ctx.lineTo(x + 8, y - 8);
+    ctx.lineTo(x + 8, y + 8);
+    ctx.lineTo(x - 8, y + 8);
+    ctx.closePath();
+    ctx.stroke();
+    
+    // Символ щита
+    ctx.fillStyle = '#FFD700';
+    ctx.beginPath();
+    ctx.arc(x, y, 4, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // Аура защиты
+    ctx.strokeStyle = '#4A90E2';
+    ctx.lineWidth = 2;
+    ctx.globalAlpha = 0.6;
+    ctx.beginPath();
+    ctx.arc(x, y, 20, 0, Math.PI * 2);
+    ctx.stroke();
+    
+    ctx.restore();
+}
+
+function drawJuggernautIcon(ctx, x, y) {
+    ctx.save();
+    
+    // Основная форма джаггернаута
+    ctx.fillStyle = '#8B4513';
+    ctx.beginPath();
+    ctx.arc(x, y, 15, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // Броневые пластины
+    ctx.strokeStyle = '#DAA520';
+    ctx.lineWidth = 3;
+    for (let i = 0; i < 4; i++) {
+        const angle = (i * Math.PI) / 2;
+        const px = x + Math.cos(angle) * 8;
+        const py = y + Math.sin(angle) * 8;
+        ctx.beginPath();
+        ctx.arc(px, py, 3, 0, Math.PI * 2);
+        ctx.stroke();
+    }
+    
+    // Символ силы
+    ctx.fillStyle = '#FF4500';
+    ctx.font = 'bold 16px Arial';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    let icon = '?', color = '#fff';
-    let time = performance.now() / 1000;
-    if (node.program.type === 'miner') {
-        icon = 'M'; color = '#ffd600';
-        // Анимация: пульсирующее кольцо
-        ctx.save();
-        ctx.globalAlpha = 0.18 + 0.12 * Math.sin(time*3 + node.x);
+    ctx.fillText('J', x, y);
+    
+    // Аура брони
+    ctx.strokeStyle = '#8B4513';
+    ctx.lineWidth = 3;
+    ctx.globalAlpha = 0.5;
+    ctx.beginPath();
+    ctx.arc(x, y, 25, 0, Math.PI * 2);
+    ctx.stroke();
+    
+    ctx.restore();
+}
+
+function drawSwarmIcon(ctx, x, y) {
+    ctx.save();
+    
+    // Рой из нескольких маленьких врагов
+    const swarmCount = 3;
+    for (let i = 0; i < swarmCount; i++) {
+        const angle = (i * Math.PI * 2) / swarmCount;
+        const px = x + Math.cos(angle) * 8;
+        const py = y + Math.sin(angle) * 8;
+        
+        ctx.fillStyle = '#FF6B35';
         ctx.beginPath();
-        ctx.arc(node.x, node.y, 22 + 4*Math.sin(time*2 + node.y), 0, 2 * Math.PI);
-        ctx.fillStyle = '#ffd600';
-        ctx.shadowColor = '#ffd600';
-        ctx.shadowBlur = 18;
+        ctx.arc(px, py, 4, 0, Math.PI * 2);
         ctx.fill();
-        ctx.restore();
-    }
-    if (node.program.type === 'anti_exe') {
-        icon = 'A'; color = '#ff1744';
-        // Анимация: пульсирующий красный глоу
-        ctx.save();
-        ctx.globalAlpha = 0.25 + 0.15 * Math.sin(time * 4);
+        
+        // Глаза
+        ctx.fillStyle = '#FF0000';
         ctx.beginPath();
-        ctx.arc(node.x, node.y, 24 + 6 * Math.sin(time * 3), 0, 2 * Math.PI);
-        ctx.fillStyle = '#ff1744';
-        ctx.shadowColor = '#ff1744';
-        ctx.shadowBlur = 20;
+        ctx.arc(px - 1, py - 1, 1, 0, Math.PI * 2);
+        ctx.arc(px + 1, py - 1, 1, 0, Math.PI * 2);
         ctx.fill();
-        ctx.restore();
     }
-    if (node.program.type === 'sentry') {
-        icon = 'T'; color = '#00ff90';
-        // Анимация: пульсирующее кольцо
-        ctx.save();
-        ctx.globalAlpha = 0.18 + 0.12 * Math.sin(time*4 + node.x + node.y);
+    
+    // Центральная точка роя
+    ctx.fillStyle = '#FFD700';
+    ctx.beginPath();
+    ctx.arc(x, y, 2, 0, Math.PI * 2);
+    ctx.fill();
+    
+    ctx.restore();
+}
+
+function drawEmpIcon(ctx, x, y) {
+    ctx.save();
+    
+    // Основная форма ЭМИ
+    ctx.fillStyle = '#FF4500';
+    ctx.beginPath();
+    ctx.arc(x, y, 10, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // Молнии
+    ctx.strokeStyle = '#FFFF00';
+    ctx.lineWidth = 2;
+    for (let i = 0; i < 4; i++) {
+        const angle = (i * Math.PI) / 2;
+        const startX = x + Math.cos(angle) * 5;
+        const startY = y + Math.sin(angle) * 5;
+        const endX = x + Math.cos(angle) * 15;
+        const endY = y + Math.sin(angle) * 15;
+        
         ctx.beginPath();
-        ctx.arc(node.x, node.y, 26 + 6*Math.abs(Math.sin(time*2 + node.x)), 0, 2 * Math.PI);
-        ctx.strokeStyle = '#00ff90';
-        ctx.lineWidth = 4.5;
-        ctx.shadowColor = '#00ff90';
-        ctx.shadowBlur = 18;
+        ctx.moveTo(startX, startY);
+        ctx.lineTo(endX, endY);
+        ctx.stroke();
+    }
+    
+    // Символ ЭМИ
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = 'bold 12px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('E', x, y);
+    
+    // Пульсирующая аура
+    const time = performance.now() / 1000;
+    const pulse = Math.sin(time * 3) * 0.3 + 0.7;
+    ctx.strokeStyle = '#FF4500';
+    ctx.lineWidth = 2;
+    ctx.globalAlpha = pulse;
+    ctx.beginPath();
+    ctx.arc(x, y, 18, 0, Math.PI * 2);
+    ctx.stroke();
+    
+    ctx.restore();
+}
+
+// --- УНИКАЛЬНЫЕ ИКОНКИ ДЛЯ ПРОГРАММ С РАЗЛИЧИЕМ ПО УРОВНЯМ ---
+function drawMinerIcon(ctx, x, y, time, level) {
+    ctx.save();
+    // Кристалл
+    ctx.beginPath();
+    if (level === 1) {
+        ctx.moveTo(x, y-8);
+        ctx.lineTo(x+5, y);
+        ctx.lineTo(x, y+8);
+        ctx.lineTo(x-5, y);
+    } else if (level === 2) {
+        ctx.moveTo(x, y-10);
+        ctx.lineTo(x+7, y);
+        ctx.lineTo(x, y+10);
+        ctx.lineTo(x-7, y);
+    } else {
+        ctx.moveTo(x, y-12);
+        ctx.lineTo(x+9, y-2);
+        ctx.lineTo(x+5, y+12);
+        ctx.lineTo(x-5, y+12);
+        ctx.lineTo(x-9, y-2);
+    }
+    ctx.closePath();
+    ctx.fillStyle = level === 1 ? '#ffe066' : level === 2 ? '#ffd600' : '#fff2b2';
+    ctx.shadowColor = '#ffd600';
+    ctx.shadowBlur = 10 + 4*level;
+    ctx.globalAlpha = 0.85;
+    ctx.fill();
+    // Вращающиеся точки и лучи
+    let dots = 2 + level*2;
+    for (let i=0; i<dots; i++) {
+        let angle = time/400 + i*2*Math.PI/dots;
+        ctx.beginPath();
+        ctx.arc(x+Math.cos(angle)*(12+level*2), y+Math.sin(angle)*(12+level*2), 2+level, 0, 2*Math.PI);
+        ctx.fillStyle = '#fffbe7';
+        ctx.globalAlpha = 0.7;
+        ctx.fill();
+        if (level >= 3) {
+            // Лучи
+            ctx.save();
+            ctx.strokeStyle = '#ffd600';
+            ctx.globalAlpha = 0.3;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(x, y);
+            ctx.lineTo(x+Math.cos(angle)*(18+level*2), y+Math.sin(angle)*(18+level*2));
+            ctx.stroke();
+            ctx.restore();
+        }
+    }
+    ctx.restore();
+}
+
+function drawSentryIcon(ctx, x, y, time, level) {
+    ctx.save();
+    // Основание
+    ctx.beginPath();
+    ctx.arc(x, y, 8+level*2, 0, 2*Math.PI);
+    ctx.fillStyle = level === 1 ? '#00ff90' : level === 2 ? '#00ffcc' : '#b2ffe7';
+    ctx.shadowColor = '#00eaff';
+    ctx.shadowBlur = 10+level*4;
+    ctx.globalAlpha = 0.85;
+    ctx.fill();
+    // Стволы
+    let barrels = level;
+    for (let i=0; i<barrels; i++) {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(time/300 + i*2*Math.PI/barrels);
+        ctx.beginPath();
+        ctx.moveTo(0,0);
+        ctx.lineTo(0, -16-4*level);
+        ctx.strokeStyle = '#00eaff';
+        ctx.lineWidth = 2+level;
+        ctx.shadowColor = '#00eaff';
+        ctx.shadowBlur = 8+level*2;
+        ctx.globalAlpha = 0.7;
         ctx.stroke();
         ctx.restore();
     }
-    if (node.program.type === 'overclocker') { icon = 'C'; color = '#b388ff'; }
-    ctx.fillStyle = color;
-    ctx.fillText(icon, node.x, node.program.level > 1 ? node.y + 12 : node.y + 18);
-    if (node.program.level > 1) {
-        ctx.font = 'bold 12px sans-serif';
-        ctx.fillStyle = '#ffd600';
-        ctx.fillText(node.program.level, node.x + 13, node.y + 22);
+    // Кольца
+    if (level >= 2) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(x, y, 15+level*2, 0, 2*Math.PI);
+        ctx.strokeStyle = '#00eaff';
+        ctx.globalAlpha = 0.25+0.1*level;
+        ctx.lineWidth = 2+level;
+        ctx.shadowColor = '#00eaff';
+        ctx.shadowBlur = 8+level*2;
+        ctx.stroke();
+        ctx.restore();
     }
     ctx.restore();
 }
 
+function drawAntiExeIcon(ctx, x, y, time, level) {
+    ctx.save();
+    // Щит
+    ctx.beginPath();
+    if (level === 1) {
+        ctx.moveTo(x, y-10);
+        ctx.lineTo(x+8, y);
+        ctx.lineTo(x, y+12);
+        ctx.lineTo(x-8, y);
+    } else if (level === 2) {
+        ctx.moveTo(x, y-12);
+        ctx.lineTo(x+10, y-2);
+        ctx.lineTo(x+6, y+14);
+        ctx.lineTo(x-6, y+14);
+        ctx.lineTo(x-10, y-2);
+    } else {
+        ctx.moveTo(x, y-14);
+        ctx.lineTo(x+12, y-4);
+        ctx.lineTo(x+8, y+16);
+        ctx.lineTo(x-8, y+16);
+        ctx.lineTo(x-12, y-4);
+    }
+    ctx.closePath();
+    ctx.fillStyle = level === 1 ? '#ff4569' : level === 2 ? '#ff1744' : '#ff8a9a';
+    ctx.shadowColor = '#ff1744';
+    ctx.shadowBlur = 12+level*4;
+    ctx.globalAlpha = 0.85;
+    ctx.fill();
+    // Разряды и трещины
+    let bolts = 1+level*2;
+    for (let i=0; i<bolts; i++) {
+        let angle = time/200 + i*2*Math.PI/bolts;
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(angle);
+        ctx.beginPath();
+        ctx.moveTo(0, -13-level*2);
+        ctx.lineTo(2, -18-2*level);
+        ctx.lineTo(-2, -18-2*level);
+        ctx.closePath();
+        ctx.fillStyle = '#fff';
+        ctx.globalAlpha = 0.5+0.2*level;
+        ctx.fill();
+        if (level >= 3) {
+            // Трещины
+            ctx.beginPath();
+            ctx.moveTo(0, -8);
+            ctx.lineTo(3, -14);
+            ctx.lineTo(-3, -16);
+            ctx.strokeStyle = '#fff';
+            ctx.globalAlpha = 0.3;
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+        }
+        ctx.restore();
+    }
+    ctx.restore();
+}
+
+function drawOverclockerIcon(ctx, x, y, time, level) {
+    ctx.save();
+    // Чип
+    ctx.beginPath();
+    ctx.rect(x-8-level, y-8-level, 16+level*2, 16+level*2);
+    ctx.fillStyle = level === 1 ? '#b388ff' : level === 2 ? '#d1aaff' : '#f3e6ff';
+    ctx.shadowColor = '#b388ff';
+    ctx.shadowBlur = 10+level*4;
+    ctx.globalAlpha = 0.85;
+    ctx.fill();
+    // Молнии
+    let bolts = level;
+    for (let i=0; i<bolts; i++) {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(Math.sin(time/300)+i*2*Math.PI/bolts);
+        ctx.beginPath();
+        ctx.moveTo(-2, -4);
+        ctx.lineTo(2, 0);
+        ctx.lineTo(-1, 0);
+        ctx.lineTo(3, 6);
+        ctx.lineTo(-2, 2);
+        ctx.lineTo(1, 2);
+        ctx.closePath();
+        ctx.fillStyle = '#fffbe7';
+        ctx.globalAlpha = 0.7+0.1*level;
+        ctx.fill();
+        ctx.restore();
+    }
+    // Ореол
+    if (level >= 3) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(x, y, 15+level*2, 0, 2*Math.PI);
+        ctx.strokeStyle = '#b388ff';
+        ctx.globalAlpha = 0.25+0.1*level;
+        ctx.lineWidth = 2+level;
+        ctx.shadowColor = '#b388ff';
+        ctx.shadowBlur = 8+level*2;
+        ctx.stroke();
+        ctx.restore();
+    }
+    ctx.restore();
+}
+
+function drawHubIcon(ctx, x, y, time, level) {
+    ctx.save();
+    // Ядро
+    ctx.beginPath();
+    ctx.arc(x, y, 13+level, 0, 2*Math.PI);
+    ctx.fillStyle = '#ffd600';
+    ctx.shadowColor = '#fffbe7';
+    ctx.shadowBlur = 18+level*2;
+    ctx.globalAlpha = 0.9;
+    ctx.fill();
+    // Орбиты
+    for (let i=0; i<3+level; i++) {
+        let angle = time/500 + i*2*Math.PI/(3+level);
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(angle);
+        ctx.beginPath();
+        ctx.arc(0, 0, 20+level*2, 0, Math.PI/6);
+        ctx.strokeStyle = '#ffd600';
+        ctx.globalAlpha = 0.5;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.restore();
+    }
+    ctx.restore();
+}
+
+// --- УНИВЕРСАЛЬНАЯ ФУНКЦИЯ ОТРИСОВКИ ПРОГРАММЫ ---
+function drawProgramIcon(ctx, node) {
+    if (!node.program || !canvas || !ctx) return;
+    let time = performance.now();
+    let level = node.program.level || 1;
+    switch(node.program.type) {
+        case 'miner':
+            drawMinerIcon(ctx, node.x, node.y, time, level);
+            break;
+        case 'sentry':
+            drawSentryIcon(ctx, node.x, node.y, time, level);
+            break;
+        case 'anti_exe':
+            drawAntiExeIcon(ctx, node.x, node.y, time, level);
+            break;
+        case 'overclocker':
+            drawOverclockerIcon(ctx, node.x, node.y, time, level);
+            break;
+    }
+    // Для HUB рисуем отдельно в drawNode
+}
+
 function drawResourcePanel(ctx) {
-    if (!gameState || !gameState.nodes) return;
+    if (!gameState || !gameState.nodes || !canvas || !ctx) return;
     ctx.save();
     ctx.globalAlpha = 0.92;
     ctx.fillStyle = '#222b';
@@ -1017,14 +1669,51 @@ function drawResourcePanel(ctx) {
     ctx.fillText('DP: ' + Math.floor(gameState.dp), 32, 40);
     ctx.fillText('CPU: ' + gameState.cpu, 32, 62);
     ctx.fillText('TRACE: ' + Math.floor(gameState.traceLevel) + ' / 200', 32, 84);
+    
+    // Информация о волнах
+    if (gameState.phase === 'PLAYING') {
+        ctx.fillStyle = gameState.isWaveBreak ? '#ffff00' : '#00ff00';
+        ctx.fillText('Волна: ' + gameState.currentWave, 32, 106);
+        
+        if (!gameState.isWaveBreak) {
+            ctx.fillStyle = '#ffaa00';
+            ctx.fillText(`Врагов: ${gameState.waveEnemiesSpawned}/${gameState.waveEnemiesTotal}`, 32, 128);
+        } else {
+            ctx.fillStyle = '#00ffff';
+            ctx.fillText(`Перерыв: ${Math.ceil(gameState.waveBreakTimer)}с`, 32, 128);
+        }
+        
+        // Комбо
+        if (gameState.comboKills > 1) {
+            ctx.fillStyle = '#ff6600';
+            ctx.fillText(`Комбо: x${gameState.comboKills}`, 32, 150);
+        }
+        
+        // Активные события
+        if (gameState.activeEvents.length > 0) {
+            ctx.fillStyle = '#ff00ff';
+            ctx.fillText(`События: ${gameState.activeEvents.length}`, 32, 172);
+        }
+    }
+    
     if (gameState.hubCaptureActive) {
         ctx.font = 'bold 17px sans-serif';
         ctx.fillStyle = '#ff1744';
-        ctx.fillText('HUB CAPTURE: ' + Math.floor(gameState.hubCaptureProgress*100) + '%', 32, 110);
+        ctx.fillText('HUB CAPTURE: ' + Math.floor(gameState.hubCaptureProgress*100) + '%', 32, 194);
     }
-    const x = 32, y = 125, w = 180, h = 38;
+    const x = 32, y = 200, w = 180, h = 38;
     ctx.beginPath();
-    ctx.roundRect(x, y, w, h, 10);
+    // Рисуем скругленный прямоугольник
+    ctx.moveTo(x + 10, y);
+    ctx.lineTo(x + w - 10, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + 10);
+    ctx.lineTo(x + w, y + h - 10);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - 10, y + h);
+    ctx.lineTo(x + 10, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - 10);
+    ctx.lineTo(x, y + 10);
+    ctx.quadraticCurveTo(x, y, x + 10, y);
+    ctx.closePath();
     ctx.fillStyle = gameState.cpu >= 50 && gameState.empCooldown <= 0 ? '#232b33ee' : '#232b3344';
     ctx.shadowColor = '#00eaff'; ctx.shadowBlur = 8;
     ctx.fill();
@@ -1039,7 +1728,7 @@ function drawResourcePanel(ctx) {
 }
 
 function drawNode(ctx, node) {
-    if (!node) return;
+    if (!node || !canvas || !ctx) return;
     ctx.save();
     let time = performance.now() / 1000;
     let isSelected = (gameState.selectedNodeId === node.id);
@@ -1167,6 +1856,49 @@ function drawNode(ctx, node) {
 
 
     if (node.type === 'hub') { ctx.font = 'bold 18px sans-serif'; ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('HUB', node.x, node.y); }
+    
+    // Индикаторы состояния Sentry
+    if (node.owner === 'player' && node.program && node.program.type === 'sentry') {
+        ctx.save();
+        
+        // Индикатор патронов
+        if (node.program.ammo !== undefined) {
+            const ammoPercent = node.program.ammo / SENTRY_MECHANICS.maxAmmo;
+            const barWidth = 24;
+            const barHeight = 3;
+            
+            ctx.fillStyle = '#333';
+            ctx.fillRect(node.x - barWidth/2, node.y - 25, barWidth, barHeight);
+            
+            ctx.fillStyle = ammoPercent > 0.5 ? '#00ff00' : ammoPercent > 0.2 ? '#ffff00' : '#ff0000';
+            ctx.fillRect(node.x - barWidth/2, node.y - 25, barWidth * ammoPercent, barHeight);
+        }
+        
+        // Индикатор перегрева
+        if (node.program.overheated) {
+            ctx.strokeStyle = '#ff6600';
+            ctx.lineWidth = 2;
+            ctx.globalAlpha = 0.7;
+            ctx.beginPath();
+            ctx.arc(node.x, node.y, size + 8, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+        
+        // Индикатор ЭМИ
+        if (node.program.empDisabled && performance.now() < node.program.empDisabled) {
+            ctx.strokeStyle = '#ff0000';
+            ctx.lineWidth = 3;
+            ctx.globalAlpha = 0.8;
+            ctx.setLineDash([5, 5]);
+            ctx.beginPath();
+            ctx.arc(node.x, node.y, size + 12, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+        
+        ctx.restore();
+    }
+    
     ctx.restore();
     drawProgramIcon(ctx, node);
 
@@ -1184,7 +1916,7 @@ function drawNode(ctx, node) {
 }
 
 function calculateProgramUIButtons(selectedNode) {
-    if (!selectedNode) return {};
+    if (!selectedNode || !canvas) return {};
     const buttons = {};
     let offsetX = 40, offsetY = 0;
     const btnW = 210, btnH = 38, btnW2 = 180, btnH2 = 36, spacing = 12; // увеличил ширину
@@ -1231,13 +1963,24 @@ function calculateProgramUIButtons(selectedNode) {
 }
 
 function drawProgramUI(ctx, selectedNode) {
-    if (!selectedNode) return;
+    if (!selectedNode || !canvas || !ctx) return;
     ctx.save();
     ctx.font = 'bold 15px sans-serif'; ctx.textBaseline = 'middle'; // уменьшил шрифт
     uiButtons = calculateProgramUIButtons(selectedNode); // Recalculate for drawing
     for (const key in uiButtons) {
         const btn = uiButtons[key];
-        ctx.beginPath(); ctx.roundRect(btn.x, btn.y, btn.w, btn.h, 10);
+        ctx.beginPath(); 
+        // Рисуем скругленный прямоугольник
+        ctx.moveTo(btn.x + 10, btn.y);
+        ctx.lineTo(btn.x + btn.w - 10, btn.y);
+        ctx.quadraticCurveTo(btn.x + btn.w, btn.y, btn.x + btn.w, btn.y + 10);
+        ctx.lineTo(btn.x + btn.w, btn.y + btn.h - 10);
+        ctx.quadraticCurveTo(btn.x + btn.w, btn.y + btn.h, btn.x + btn.w - 10, btn.y + btn.h);
+        ctx.lineTo(btn.x + 10, btn.y + btn.h);
+        ctx.quadraticCurveTo(btn.x, btn.y + btn.h, btn.x, btn.y + btn.h - 10);
+        ctx.lineTo(btn.x, btn.y + 10);
+        ctx.quadraticCurveTo(btn.x, btn.y, btn.x + 10, btn.y);
+        ctx.closePath();
         ctx.fillStyle = '#232b33ee'; ctx.shadowColor = '#00eaff';
         ctx.shadowBlur = 8; ctx.fill(); ctx.shadowBlur = 0;
         ctx.lineWidth = 2; ctx.strokeStyle = '#00eaff'; ctx.stroke();
@@ -1255,7 +1998,7 @@ function drawProgramUI(ctx, selectedNode) {
             label = `Upgrade Lvl ${prog.level+1}\n(${cost}DP, ${cpuCost}CPU)`;
         } else if (btn.type === 'upgrade_hub') {
             // --- Отображение стоимости апгрейда HUB ---
-            let cost = 35 * gameState.hubLevel; // Уменьшено с 45 до 35
+            let cost = 50 * gameState.hubLevel; // Увеличено с 35 до 50
             label = `Upgrade HUB\n(${cost} CPU)`;
         } else {
             let btnLabel = btn.label || '';
@@ -1276,6 +2019,7 @@ function drawProgramUI(ctx, selectedNode) {
 }
 
 function drawMenu(ctx) {
+    if (!canvas || !ctx) return;
     ctx.save();
     ctx.fillStyle = '#181c22ee'; ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.font = 'bold 48px sans-serif'; ctx.fillStyle = '#ffd600'; ctx.textAlign = 'center';
@@ -1284,7 +2028,18 @@ function drawMenu(ctx) {
     ctx.fillText('AI-Driven Balance Edition', canvas.width/2, canvas.height/2 - 40);
     
     const btn = { x: canvas.width/2-120, y: canvas.height/2+20, w: 240, h: 50 };
-    ctx.beginPath(); ctx.roundRect(btn.x, btn.y, btn.w, btn.h, 15);
+    ctx.beginPath(); 
+    // Используем стандартный способ рисования скругленного прямоугольника
+    ctx.moveTo(btn.x + 15, btn.y);
+    ctx.lineTo(btn.x + btn.w - 15, btn.y);
+    ctx.quadraticCurveTo(btn.x + btn.w, btn.y, btn.x + btn.w, btn.y + 15);
+    ctx.lineTo(btn.x + btn.w, btn.y + btn.h - 15);
+    ctx.quadraticCurveTo(btn.x + btn.w, btn.y + btn.h, btn.x + btn.w - 15, btn.y + btn.h);
+    ctx.lineTo(btn.x + 15, btn.y + btn.h);
+    ctx.quadraticCurveTo(btn.x, btn.y + btn.h, btn.x, btn.y + btn.h - 15);
+    ctx.lineTo(btn.x, btn.y + 15);
+    ctx.quadraticCurveTo(btn.x, btn.y, btn.x + 15, btn.y);
+    ctx.closePath();
     ctx.fillStyle = '#ffd600'; ctx.fill();
     ctx.font = 'bold 24px sans-serif'; ctx.fillStyle = '#232b33'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText('Start New Game', btn.x + btn.w/2, btn.y + btn.h/2);
@@ -1292,6 +2047,7 @@ function drawMenu(ctx) {
 }
 
 function drawEndScreen(ctx, isWin, score) {
+    if (!canvas || !ctx) return;
     ctx.save();
     ctx.fillStyle = isWin ? 'rgba(0, 255, 144, 0.85)' : 'rgba(255, 23, 68, 0.85)';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -1301,7 +2057,18 @@ function drawEndScreen(ctx, isWin, score) {
     ctx.fillText('Final DP: ' + Math.floor(score), canvas.width/2, canvas.height/2 - 10);
     
     const btn = { x: canvas.width/2 - 80, y: canvas.height/2 + 30, w: 160, h: 44 };
-    ctx.beginPath(); ctx.roundRect(btn.x, btn.y, btn.w, btn.h, 10);
+    ctx.beginPath(); 
+    // Рисуем скругленный прямоугольник
+    ctx.moveTo(btn.x + 10, btn.y);
+    ctx.lineTo(btn.x + btn.w - 10, btn.y);
+    ctx.quadraticCurveTo(btn.x + btn.w, btn.y, btn.x + btn.w, btn.y + 10);
+    ctx.lineTo(btn.x + btn.w, btn.y + btn.h - 10);
+    ctx.quadraticCurveTo(btn.x + btn.w, btn.y + btn.h, btn.x + btn.w - 10, btn.y + btn.h);
+    ctx.lineTo(btn.x + 10, btn.y + btn.h);
+    ctx.quadraticCurveTo(btn.x, btn.y + btn.h, btn.x, btn.y + btn.h - 10);
+    ctx.lineTo(btn.x, btn.y + 10);
+    ctx.quadraticCurveTo(btn.x, btn.y, btn.x + 10, btn.y);
+    ctx.closePath();
     ctx.fillStyle = '#232b33'; ctx.fill();
     ctx.font = 'bold 22px sans-serif'; ctx.fillStyle = '#ffd600'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText('Main Menu', btn.x + btn.w/2, btn.y + btn.h/2);
@@ -1309,7 +2076,7 @@ function drawEndScreen(ctx, isWin, score) {
 }
 
 function drawHint(ctx, text) {
-    if (!text) return;
+    if (!text || !canvas || !ctx) return;
     ctx.save();
     ctx.globalAlpha = 0.92; ctx.fillStyle = '#232b33ee';
     ctx.font = 'bold 16px sans-serif';
@@ -1340,7 +2107,85 @@ function addGameLog(message, type = 'info') {
     updateInterface();
 }
 
+// Функция создания эффекта достижения
+function createAchievementEffect(message) {
+    if (!canvas) return;
+    visualEffects.achievementEffects.push({
+        message: message,
+        time: performance.now(),
+        x: canvas.width / 2,
+        y: canvas.height / 2 - 100
+    });
+}
+
+// Функция проверки достижений
+function checkAchievements() {
+    if (!gameStats || !gameStats.achievements || !gameState || !gameState.nodes) return;
+    const achievements = gameStats.achievements;
+    
+    // Мастер майнера
+    if (!achievements.masterMiner) {
+        const highLevelMiners = Object.values(gameState.nodes).filter(n => 
+            n.owner === 'player' && n.program && n.program.type === 'miner' && n.program.level >= 3
+        ).length;
+        if (highLevelMiners >= 10) {
+            achievements.masterMiner = true;
+            addGameLog('🏆 ДОСТИЖЕНИЕ: Мастер майнера!', 'success');
+            createAchievementEffect('🏆 МАСТЕР МАЙНЕРА!');
+        }
+    }
+    
+    // Защитник сети
+    if (!achievements.networkDefender) {
+        const highLevelSentry = Object.values(gameState.nodes).filter(n => 
+            n.owner === 'player' && n.program && n.program.type === 'sentry' && n.program.level >= 2
+        ).length;
+        if (highLevelSentry >= 5) {
+            achievements.networkDefender = true;
+            addGameLog('🏆 ДОСТИЖЕНИЕ: Защитник сети!', 'success');
+            createAchievementEffect('🏆 ЗАЩИТНИК СЕТИ!');
+        }
+    }
+    
+    // Охотник на врагов
+    if (!achievements.enemyHunter && gameStats.enemiesKilled >= 50) {
+        achievements.enemyHunter = true;
+        addGameLog('🏆 ДОСТИЖЕНИЕ: Охотник на врагов!', 'success');
+        createAchievementEffect('🏆 ОХОТНИК НА ВРАГОВ!');
+    }
+    
+    // Мастер Hub
+    if (!achievements.hubMaster && gameState.hubLevel >= 5) {
+        achievements.hubMaster = true;
+        addGameLog('🏆 ДОСТИЖЕНИЕ: Мастер Hub!', 'success');
+        createAchievementEffect('🏆 МАСТЕР HUB!');
+    }
+    
+    // Мастер ANTI.EXE
+    if (!achievements.antiExeMaster) {
+        const antiExeCount = Object.values(gameState.nodes).filter(n => 
+            n.owner === 'player' && n.program && n.program.type === 'anti_exe'
+        ).length;
+        if (antiExeCount >= 3) {
+            achievements.antiExeMaster = true;
+            addGameLog('🏆 ДОСТИЖЕНИЕ: Мастер ANTI.EXE!', 'success');
+            createAchievementEffect('🏆 МАСТЕР ANTI.EXE!');
+        }
+    }
+    
+    // Долгожитель
+    if (!achievements.longSurvivor) {
+        const gameTime = (Date.now() - gameStats.startTime) / 1000;
+        if (gameTime >= 1200) { // 20 минут
+            achievements.longSurvivor = true;
+            addGameLog('🏆 ДОСТИЖЕНИЕ: Долгожитель!', 'success');
+            createAchievementEffect('🏆 ДОЛГОЖИТЕЛЬ!');
+        }
+    }
+}
+
 function updateInterface() {
+    if (!gameStats || !gameState) return;
     // Обновляем статистику
     const gameTime = Math.floor((Date.now() - gameStats.startTime) / 1000);
     const minutes = Math.floor(gameTime / 60);
@@ -1374,7 +2219,7 @@ function updateInterface() {
     
     // Обновляем список врагов
     const enemyList = document.getElementById('enemy-list');
-    if (enemyList) {
+    if (enemyList && gameState.enemies) {
         const enemyCounts = {};
         for (const enemy of gameState.enemies) {
             enemyCounts[enemy.type] = (enemyCounts[enemy.type] || 0) + 1;
@@ -1396,13 +2241,16 @@ function updateInterface() {
     }
 }
 
+// В начало render
 function render() {
-    isRendering = true;
+    if (!canvas || !ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     const time = Date.now();
     
     // Обновляем интерфейс
     updateInterface();
+    // Проверяем достижения
+    checkAchievements();
     // Соединения
     for (const id in gameState.nodes) {
         const node = gameState.nodes[id];
@@ -1519,6 +2367,41 @@ function render() {
     }
     // Очищаем старые взрывы
     visualEffects.enemyExplosions = visualEffects.enemyExplosions.filter(boom => (performance.now() - boom.time) < 420);
+    
+    // --- Эффекты достижений ---
+    for (const effect of visualEffects.achievementEffects) {
+        const t = (performance.now() - effect.time) / 3000; // 3 секунды
+        if (t > 1) continue;
+        
+        ctx.save();
+        ctx.globalAlpha = 1 - t;
+        ctx.font = 'bold 32px sans-serif';
+        ctx.fillStyle = '#ffd600';
+        ctx.shadowColor = '#ffd600';
+        ctx.shadowBlur = 20;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        
+        // Анимация появления
+        const scale = t < 0.3 ? t / 0.3 : 1;
+        ctx.translate(effect.x, effect.y);
+        ctx.scale(scale, scale);
+        
+        ctx.fillText(effect.message, 0, 0);
+        
+        // Дополнительные эффекты
+        if (t < 0.5) {
+            ctx.globalAlpha = (0.5 - t) * 2;
+            ctx.beginPath();
+            ctx.arc(0, 0, 100 + 50 * Math.sin(t * 10), 0, 2 * Math.PI);
+            ctx.strokeStyle = '#ffd600';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+        }
+        
+        ctx.restore();
+    }
+    
     // --- Screen shake ---
     let shakeX = 0, shakeY = 0;
     if (screenShake.duration > 0) {
@@ -1526,17 +2409,78 @@ function render() {
         shakeY = (Math.random() - 0.5) * 2 * screenShake.magnitude;
         ctx.save();
         ctx.translate(shakeX, shakeY);
-    }
-    if (screenShake.duration > 0) {
+        
+        // Обновляем duration
+        screenShake.duration -= 16; // 60fps
+        if (screenShake.duration <= 0) {
+            screenShake.duration = 0;
+            screenShake.magnitude = 0;
+        }
+        
         ctx.restore();
     }
     // --- Очистка массивов эффектов ---
     visualEffects.sentryShots = visualEffects.sentryShots.filter(shot => (performance.now() - shot.time) < 400);
     visualEffects.sentryFlashes = visualEffects.sentryFlashes.filter(flash => (performance.now() - flash.time) < 300);
     visualEffects.enemyExplosions = visualEffects.enemyExplosions.filter(boom => (performance.now() - boom.time) < 420);
-    isRendering = false;
+    visualEffects.achievementEffects = visualEffects.achievementEffects.filter(effect => (performance.now() - effect.time) < 3000);
+    
+    // --- Отрисовка эффектов волн ---
+    for (const effect of visualEffects.waveEffects) {
+        const t = (performance.now() - effect.time) / (effect.duration * 1000);
+        if (t > 1) continue;
+        
+        ctx.save();
+        ctx.globalAlpha = 1 - t;
+        ctx.fillStyle = effect.type === 'wave_start' ? '#00ff00' : '#ff0000';
+        ctx.font = 'bold 24px Arial';
+        ctx.textAlign = 'center';
+        ctx.shadowColor = effect.type === 'wave_start' ? '#00ff00' : '#ff0000';
+        ctx.shadowBlur = 15;
+        ctx.fillText(`Волна ${effect.wave}`, canvas.width / 2, canvas.height / 2 - 50);
+        ctx.restore();
+    }
+    visualEffects.waveEffects = visualEffects.waveEffects.filter(effect => (performance.now() - effect.time) < effect.duration * 1000);
+    
+    // --- Отрисовка эффектов событий ---
+    for (const effect of visualEffects.eventEffects) {
+        const t = (performance.now() - effect.time) / (effect.duration * 1000);
+        if (t > 1) continue;
+        
+        const alpha = 0.3 * (1 - t);
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = effect.type === 'enemy_boost' ? '#ff0000' : 
+                       effect.type === 'player_boost' ? '#00ff00' : 
+                       effect.type === 'miner_tax' ? '#ffff00' : 
+                       effect.type === 'sentry_overcharge' ? '#00ffff' : '#ff00ff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.restore();
+    }
+    visualEffects.eventEffects = visualEffects.eventEffects.filter(effect => (performance.now() - effect.time) < effect.duration * 1000);
+    
+    // --- Отрисовка комбо эффектов ---
+    for (const effect of visualEffects.comboEffects) {
+        const t = (performance.now() - effect.time) / (effect.duration * 1000);
+        if (t > 1) continue;
+        
+        const alpha = 1 - t;
+        const scale = 1 + t * 0.5;
+        
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = '#ff6600';
+        ctx.font = `bold ${24 * scale}px Arial`;
+        ctx.textAlign = 'center';
+        ctx.shadowColor = '#ff6600';
+        ctx.shadowBlur = 20;
+        ctx.fillText(`КОМБО x${effect.combo}!`, canvas.width / 2, canvas.height / 2 + 50);
+        ctx.restore();
+    }
+    visualEffects.comboEffects = visualEffects.comboEffects.filter(effect => (performance.now() - effect.time) < effect.duration * 1000);
 }
 
+// В начало update
 function update(dt, now) {
     // --- Управление состоянием игры ---
     if (gameState.phase !== 'PLAYING') return;
@@ -1568,55 +2512,143 @@ function update(dt, now) {
     }
 
     // --- Логика для каждого узла ---
-    for (const id in gameState.nodes) {
-        const node = gameState.nodes[id];
-        if (!node) continue;
+    if (gameState.nodes) {
+        for (const id in gameState.nodes) {
+            const node = gameState.nodes[id];
+            if (!node) continue;
 
-        // 1. Захват узлов
-        if (node.isCapturing) {
-            node.captureProgress += dt; // 1 секунда на захват
-            if (node.captureProgress >= 1) {
-                node.isCapturing = false;
-                node.captureProgress = 0;
-                node.owner = 'player';
-                node.program = null;
-                gameStats.nodesCaptured++;
-                addGameLog(`Нода ${node.id} захвачена игроком`, 'success');
-                if (!godMode) gameState.traceLevel += 5; // Значительный штраф за расширение
-                sound.play('capture_success');
-                if (node.type === 'data_cache') {
-                    gameState.dp += 100;
-                    node.type = 'data'; // Бонус выдается один раз
+            // 1. Захват узлов
+            if (node.isCapturing) {
+                node.captureProgress += dt; // 1 секунда на захват
+                if (node.captureProgress >= 1) {
+                    node.isCapturing = false;
+                    node.captureProgress = 0;
+                    node.owner = 'player';
+                    node.program = null;
+                    gameStats.nodesCaptured++;
+                    addGameLog(`Нода ${node.id} захвачена игроком`, 'success');
+                    if (!godMode) gameState.traceLevel += 5; // Значительный штраф за расширение
+                    sound.play('capture_success');
+                    if (node.type === 'data_cache') {
+                        gameState.dp += 100;
+                        node.type = 'data'; // Бонус выдается один раз
+                    }
                 }
             }
-        }
 
-        // 2. Логика программ игрока
-        if (node.owner === 'player' && node.program) {
-            // Регенерация щита
-            
-            // Атака Sentry
-            if (node.program.type === 'sentry') {
-                if (!node.program.cooldown || now > node.program.cooldown) {
-                    let sentryRange = 200 + 20 * (node.program.level - 1);
-                    let nearestEnemy = null, minDist = sentryRange;
-                    for (const enemy of gameState.enemies) {
-                        const enemyNode = gameState.nodes[enemy.currentNodeId];
-                        if (!enemyNode) continue;
-                        const dist = getDistance(node.x, node.y, enemyNode.x, enemyNode.y);
-                        if (dist < minDist) { minDist = dist; nearestEnemy = enemy; }
+            // 2. Логика программ игрока
+            if (node.owner === 'player' && node.program) {
+                // Регенерация щита
+                
+                // Атака Sentry
+                if (node.program.type === 'sentry') {
+                    // Проверяем, не отключен ли Sentry ЭМИ
+                    if (node.program.empDisabled && now < node.program.empDisabled) {
+                        continue; // Пропускаем атаку
                     }
-                    if (nearestEnemy) {
-                        let baseDmg = 15 * Math.pow(2, node.program.level - 1); // Урон увеличен с 10 до 15 и удваивается с уровнем
-                        // Бонус от hub level: +5% за каждый уровень
-                        let hubBonus = 1 + (gameState.hubLevel - 1) * 0.05;
-                        baseDmg *= hubBonus;
-                        const enemyNode = gameState.nodes[nearestEnemy.currentNodeId];
-                        nearestEnemy.health -= baseDmg;
-                        visualEffects.sentryShots.push({ from: {x:node.x, y:node.y}, to: {x:enemyNode.x, y:enemyNode.y}, time: now, color: '#00ff90' });
-                        visualEffects.sentryFlashes.push({ x:enemyNode.x, y:enemyNode.y, time: now });
-                        sound.play('sentry_shoot');
-                        node.program.cooldown = now + (1000 / node.program.level);
+                    
+                    // Инициализируем свойства Sentry если их нет
+                    if (!node.program.ammo) {
+                        node.program.ammo = SENTRY_MECHANICS.maxAmmo;
+                        node.program.reloadStart = 0;
+                        node.program.overheated = false;
+                        node.program.overheatStart = 0;
+                    }
+                    
+                    // Проверяем перезарядку
+                    if (node.program.ammo <= 0 && !node.program.reloadStart) {
+                        node.program.reloadStart = now;
+                    }
+                    
+                    if (node.program.reloadStart && now - node.program.reloadStart > SENTRY_MECHANICS.reloadTime) {
+                        node.program.ammo = SENTRY_MECHANICS.maxAmmo;
+                        node.program.reloadStart = 0;
+                    }
+                    
+                    // Проверяем перегрев
+                    if (node.program.overheated && now - node.program.overheatStart > SENTRY_MECHANICS.overheatCooldown) {
+                        node.program.overheated = false;
+                        node.program.overheatStart = 0;
+                    }
+                    
+                    // Атакуем только если есть патроны и нет перегрева
+                    if (node.program.ammo > 0 && !node.program.overheated && (!node.program.cooldown || now > node.program.cooldown)) {
+                        let sentryRange = 200 + 20 * (node.program.level - 1);
+                        let nearestEnemy = null, minDist = sentryRange;
+                        
+                        for (const enemy of gameState.enemies) {
+                            // Sentry не может стрелять в стелс-врагов
+                            if (enemy.type === 'stealth') continue;
+                            
+                            const enemyNode = gameState.nodes[enemy.currentNodeId];
+                            if (!enemyNode) continue;
+                            
+                            // Проверяем, не защищен ли враг щитом
+                            let isProtectedByShield = false;
+                            for (const otherEnemy of gameState.enemies) {
+                                if (otherEnemy.type === 'shield' && otherEnemy !== enemy) {
+                                    const shieldNode = gameState.nodes[otherEnemy.currentNodeId];
+                                    if (shieldNode) {
+                                        const shieldDist = getDistance(enemyNode.x, enemyNode.y, shieldNode.x, shieldNode.y);
+                                        if (shieldDist < otherEnemy.shieldRadius) {
+                                            isProtectedByShield = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            if (!isProtectedByShield) {
+                                const dist = getDistance(node.x, node.y, enemyNode.x, enemyNode.y);
+                                if (dist < minDist) { minDist = dist; nearestEnemy = enemy; }
+                            }
+                        }
+                        
+                        if (nearestEnemy) {
+                            let baseDmg = 15 * Math.pow(2, node.program.level - 1);
+                            let hubBonus = 1 + (gameState.hubLevel - 1) * 0.05;
+                            baseDmg *= hubBonus;
+                            
+                            // Применяем множители урона от событий
+                            if (gameState.sentryOverchargeActive) {
+                                baseDmg *= 2;
+                            }
+                            
+                            // Применяем броню врага
+                            const armorMultiplier = ARMOR_MECHANICS[nearestEnemy.armorType] || 1.0;
+                            baseDmg *= armorMultiplier;
+                            
+                            // Пробитие брони
+                            if (nearestEnemy.piercingDamage > 1.0) {
+                                baseDmg *= nearestEnemy.piercingDamage;
+                            }
+                            
+                            const enemyNode = gameState.nodes[nearestEnemy.currentNodeId];
+                            nearestEnemy.health -= baseDmg;
+                            
+                            // Визуальные эффекты
+                            visualEffects.sentryShots.push({ 
+                                from: {x:node.x, y:node.y}, 
+                                to: {x:enemyNode.x, y:enemyNode.y}, 
+                                time: now, 
+                                color: node.program.ammo <= 2 ? '#ff6600' : '#00ff90' // Оранжевый при малых патронах
+                            });
+                            visualEffects.sentryFlashes.push({ x:enemyNode.x, y:enemyNode.y, time: now });
+                            
+                            sound.play('sentry_shoot');
+                            
+                            // Уменьшаем патроны
+                            node.program.ammo--;
+                            
+                            // Проверяем перегрев
+                            if (node.program.ammo <= SENTRY_MECHANICS.maxAmmo - SENTRY_MECHANICS.overheatThreshold) {
+                                node.program.overheated = true;
+                                node.program.overheatStart = now;
+                            }
+                            
+                            // Задержка между выстрелами
+                            node.program.cooldown = now + (1000 / node.program.level);
+                        }
                     }
                 }
             }
@@ -1634,8 +2666,8 @@ function update(dt, now) {
                     let delaySteps = 3 + (gameState.hubLevel - 1);
                     enemy.isStunnedUntil = performance.now() + (delaySteps * 1000);
                     
-                    // Наносим периодический урон 10 за каждый ход (уменьшено с 15)
-                    enemy.health -= 10;
+                    // Наносим периодический урон 25 за каждый ход (увеличено с 10)
+                    enemy.health -= 25;
                     
                     // Ослабляем броню врагов (уменьшаем сопротивление)
                     if (enemy.armor === undefined) enemy.armor = 1;
@@ -1718,7 +2750,25 @@ function update(dt, now) {
                     // Бонус от hub level: +5% за каждый уровень
                     let baseIncome = 3 * Math.pow(1.8, level - 1);
                     let hubBonus = 1 + (gameState.hubLevel - 1) * 0.05;
-                    dpIncome += baseIncome * hubBonus;
+                    
+                    // Налог на высокие уровни miner'ов (уровень 4+)
+                    let taxMultiplier = 1.0;
+                    if (level >= 4) {
+                        taxMultiplier = 0.9; // -10% за уровень 4+
+                        if (level >= 6) {
+                            taxMultiplier = 0.8; // -20% за уровень 6+
+                        }
+                    }
+                    
+                    // Применяем эффекты событий
+                    if (gameState.minerTaxActive) {
+                        taxMultiplier *= 0.5; // Налог на майнеры
+                    }
+                    if (gameState.playerBoostActive) {
+                        taxMultiplier *= 1.5; // Бонус игрока
+                    }
+                    
+                    dpIncome += baseIncome * hubBonus * taxMultiplier;
                 }
                 if (node.program.type === 'overclocker') cpuIncome += 1 * level;
             }
@@ -1728,125 +2778,121 @@ function update(dt, now) {
         gameState.lastMinerTick = 0;
     }
     
-    // --- Враги ---
-    gameState.lastEnemySpawn += dt;
-    const spawnInterval = gameState.hubCaptureActive ? 2 : Math.max(1.5, (10 - (gameState.traceLevel * 0.02)) ); // секунды
-    if (gameState.lastEnemySpawn > spawnInterval) {
-        // Враги не могут появляться на нодах игрока и минимум через одну ноду от нод игрока
-        const playerNodes = Object.values(gameState.nodes).filter(n => n.owner === 'player');
-        const playerNodeIds = new Set(playerNodes.map(n => n.id));
-        const playerNeighborIds = new Set();
+    // --- Система волн врагов ---
+    if (!gameState.isWaveBreak) {
+        gameState.waveTimer += dt;
         
-        // Добавляем соседей нод игрока
-        for (const playerNode of playerNodes) {
-            for (const neighborId of playerNode.neighbors) {
-                playerNeighborIds.add(neighborId);
-            }
-        }
-        
-        const spawnableNodes = Object.values(gameState.nodes).filter(n => 
-            n.owner !== 'player' && 
-            n.type !== 'hub' && 
-            !playerNodeIds.has(n.id) && 
-            !playerNeighborIds.has(n.id)
-        );
-        
-        if (spawnableNodes.length > 0) {
-            const startNode = spawnableNodes[Math.floor(Math.random() * spawnableNodes.length)];
-            // Выбираем тип врага на основе trace level и времени игры
-            let enemyType = 'patrol';
-            const gameTime = (Date.now() - gameStats.startTime) / 1000;
+        // Спавн врагов для текущей волны
+        if (gameState.waveEnemiesSpawned < gameState.waveEnemiesTotal) {
+            gameState.lastEnemySpawn += dt;
+            const spawnInterval = gameState.hubCaptureActive ? 1 : Math.max(0.8, (5 - (gameState.currentWave * 0.1)));
             
-            if (gameState.traceLevel > 100 || gameTime > 300) {
-                // Поздняя игра - появляются сложные враги
-                const types = ['hunter', 'infector', 'blitzer', 'tank'];
-                enemyType = types[Math.floor(Math.random() * types.length)];
-            } else if (gameState.traceLevel > 50 || gameTime > 120) {
-                // Средняя игра - hunter и infector
-                enemyType = Math.random() > 0.5 ? 'hunter' : 'infector';
-            } else if (gameState.traceLevel > 20 || gameTime > 60) {
-                // Ранняя игра - hunter
-                enemyType = 'hunter';
-            }
-            let path;
-            if (enemyType === 'hunter') {
-                let targets = Object.values(gameState.nodes).filter(n => n.owner === 'player' && n.program?.type === 'miner' || n.type === 'cpu_node');
-                if (targets.length === 0) targets = Object.values(gameState.nodes).filter(n => n.owner === 'player');
-                
-                if (targets.length > 0) {
-                    let targetNode = targets[Math.floor(Math.random() * targets.length)];
-                    path = findPathBFS(gameState.nodes, startNode.id, targetNode.id);
-                    if (gameState.nodes[targetNode.id]) {
-                        gameState.nodes[targetNode.id].isTargeted = true;
-                        gameState.nodes[targetNode.id].targetedUntil = performance.now() + 3000;
-                    }
+            if (gameState.lastEnemySpawn > spawnInterval) {
+                if (spawnEnemyForWave(gameState.currentWave)) {
+                    gameState.lastEnemySpawn = 0;
                 }
             }
-            if (!path || path.length < 2) path = getRandomPath(gameState.nodes, startNode.id, 10);
-            
-            const enemy = new Enemy('e' + gameState.enemyIdCounter++, startNode.id, path, enemyType);
-            enemy.lastMove = 0; // таймер движения
-            gameState.enemies.push(enemy);
-            
-            // Логируем появление врага
-            const enemyNames = {
-                'hunter': '🦖 Охотник',
-                'patrol': '🕷️ Патрульный',
-                'infector': '🦠 Инфектор',
-                'blitzer': '⚡ Блитцер',
-                'tank': '🛡️ Танк'
-            };
-            addGameLog(`Появился ${enemyNames[enemyType]}`, 'warning');
+        } else if (gameState.enemies.length === 0) {
+            // Волна завершена
+            endWave();
         }
-        gameState.lastEnemySpawn = 0;
+    } else {
+        // Перерыв между волнами
+        gameState.waveBreakTimer -= dt;
+        if (gameState.waveBreakTimer <= 0) {
+            gameState.isWaveBreak = false;
+            startWave(gameState.currentWave + 1);
+        }
     }
+    
+    // --- Система случайных событий ---
+    updateRandomEvents(now);
+    
+    // --- Обновление поведения врагов ---
+    updateEnemyBehaviors(dt, now);
 
     // Логика врагов (движение, атака)
-    for (const enemy of gameState.enemies) {
-        if (enemy.isStunnedUntil > performance.now()) continue;
-        if (!enemy.path || enemy.pathStep >= enemy.path.length - 1) {
-            recalcAllEnemyPaths();
-            continue;
-        }
-        if (enemy.lastMove === undefined) enemy.lastMove = 0;
-        enemy.lastMove += dt;
-        let moveInterval = (enemy.type === 'hunter' ? 0.9 : 1.4); // секунды
-        if (enemy.lastMove > moveInterval) {
-            enemy.pathStep++; enemy.currentNodeId = enemy.path[enemy.pathStep]; enemy.lastMove = 0;
-        }
-        const node = gameState.nodes[enemy.currentNodeId];
-        if (node && node.owner === 'player' && !godMode) {
-            let damage = 30 * dt;
-            if (node.program?.type !== 'sentry') {
-                node.captureProgress -= 0.3 * dt;
-                if (node.captureProgress <= 0) {
-                    node.owner = 'neutral'; node.program = null; node.captureProgress = 0;
-                    if(gameState.selectedNodeId === node.id) gameState.selectedNodeId = null;
-                    triggerScreenShake(7, 250); sound.play('node_lost');
+    if (gameState.enemies) {
+        for (const enemy of gameState.enemies) {
+            if (!enemy) continue;
+            if (enemy.isStunnedUntil > performance.now()) continue;
+            if (!enemy.path || enemy.pathStep >= enemy.path.length - 1) {
+                recalcAllEnemyPaths();
+                continue;
+            }
+            if (enemy.lastMove === undefined) enemy.lastMove = 0;
+            enemy.lastMove += dt;
+            let moveInterval = (enemy.type === 'hunter' ? 0.9 : 1.4); // секунды
+            if (enemy.lastMove > moveInterval) {
+                enemy.pathStep++; enemy.currentNodeId = enemy.path[enemy.pathStep]; enemy.lastMove = 0;
+            }
+            const node = gameState.nodes[enemy.currentNodeId];
+            if (node && node.owner === 'player' && !godMode) {
+                let damage = 30 * dt;
+                if (node.program?.type !== 'sentry') {
+                    node.captureProgress -= 0.3 * dt;
+                    if (node.captureProgress <= 0) {
+                        node.owner = 'neutral'; node.program = null; node.captureProgress = 0;
+                        if(gameState.selectedNodeId === node.id) gameState.selectedNodeId = null;
+                        triggerScreenShake(7, 250); sound.play('node_lost');
+                    }
                 }
             }
         }
     }
     
     // --- Очистка и таймеры ---
-    const killedEnemies = gameState.enemies.filter(e => e.health <= 0);
-    if(killedEnemies.length > 0) {
-        // Убийство врагов замедляет trace level на 5% и уменьшает текущий trace level на 50
-        if (!godMode) {
-            gameState.traceLevel = Math.max(0, gameState.traceLevel - 50);
-            // Замедляем рост trace level на 5%
-            gameState.traceLevel *= 0.95;
+    if (gameState.enemies) {
+        const killedEnemies = gameState.enemies.filter(e => e && e.health <= 0);
+        if(killedEnemies.length > 0) {
+            // Система комбо
+            addComboKill();
+            
+            // Убийство врагов замедляет trace level на 5% и уменьшает текущий trace level на 50
+            if (!godMode) {
+                gameState.traceLevel = Math.max(0, gameState.traceLevel - 50);
+                // Замедляем рост trace level на 5%
+                gameState.traceLevel *= 0.95;
+            }
+            
+            // Базовый бонус за убийство
+            const baseReward = 8;
+            const totalReward = baseReward * killedEnemies.length;
+            gameState.dp += totalReward;
+            gameStats.enemiesKilled += killedEnemies.length;
+            gameStats.totalDamageDealt += totalReward;
+            
+            // Специальные эффекты для разных типов врагов
+            for(const enemy of killedEnemies) {
+                if (enemy && gameState.nodes[enemy.currentNodeId]) {
+                    const node = gameState.nodes[enemy.currentNodeId];
+                    if (node) {
+                        visualEffects.enemyExplosions.push({x:node.x, y:node.y, time: now});
+                        
+                        // Бомбардировщик взрывается при смерти
+                        if (enemy.type === 'bomber') {
+                            const nearbyNodes = Object.values(gameState.nodes).filter(n => 
+                                getDistance(n.x, n.y, node.x, node.y) < 100
+                            );
+                            for (const nearby of nearbyNodes) {
+                                if (nearby.owner === 'player' && nearby.program) {
+                                    nearby.program = null;
+                                    addGameLog('💥 Бомбардировщик взорвался!', 'warning');
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            triggerScreenShake(5, 150); 
+            sound.play('enemy_explode');
+            
+            // Проверяем расширенные достижения
+            checkExtendedAchievements();
         }
-        gameState.dp += 8 * killedEnemies.length; // Уменьшено с 15 до 8
-        gameStats.enemiesKilled += killedEnemies.length;
-        addGameLog(`Убито ${killedEnemies.length} врагов (+${8 * killedEnemies.length} DP)`, 'success');
-        for(const enemy of killedEnemies) {
-            const node = gameState.nodes[enemy.currentNodeId];
-            if (node) visualEffects.enemyExplosions.push({x:node.x, y:node.y, time: now});
-        }
-        triggerScreenShake(5, 150); sound.play('enemy_explode');
+        gameState.enemies = gameState.enemies.filter(e => e && e.health > 0);
     }
-    gameState.enemies = gameState.enemies.filter(e => e.health > 0);
     
     if (gameState.empCooldown > 0) gameState.empCooldown -= dt * 1000;
     if (screenShake.duration > 0) screenShake.duration -= dt * 1000;
@@ -1856,7 +2902,16 @@ function update(dt, now) {
     }
 }
 
+// В начало mainLoop
 function mainLoop() {
+    if (!canvas || !ctx) {
+        requestAnimationFrame(mainLoop);
+        return;
+    }
+    if (!gameState) {
+        requestAnimationFrame(mainLoop);
+        return;
+    }
     if (gameState.phase === 'MENU') {
         drawMenu(ctx);
         requestAnimationFrame(mainLoop);
@@ -1878,6 +2933,7 @@ function mainLoop() {
 }
 
 function startNewGame() {
+    if (!gameState) return;
     gameState.nodes = generateCanvasNetwork();
     if (gameState.nodes['hub']) {
         gameState.nodes['hub'].owner = 'player';
@@ -1900,49 +2956,376 @@ function startNewGame() {
     gameState.enemyIdCounter = 1;
     gameState.win = false;
     gameState.phase = 'PLAYING';
+    gameState.hubLevel = 1;
+    
+    // Инициализация системы волн и событий
+    gameState.currentWave = 1;
+    gameState.waveEnemiesSpawned = 0;
+    gameState.waveEnemiesTotal = 5;
+    gameState.waveTimer = 0;
+    gameState.waveBreakTimer = 0;
+    gameState.isWaveBreak = false;
+    gameState.waveBreakDuration = 10;
+    gameState.randomEvents = [];
+    gameState.activeEvents = [];
+    gameState.lastEventCheck = 0;
+    gameState.eventCheckInterval = 30;
+    gameState.achievementPoints = 0;
+    gameState.comboKills = 0;
+    gameState.lastKillTime = 0;
+    gameState.comboTimeout = 3000;
+    
     lastTimestamp = performance.now();
     uiButtons = {};
-    visualEffects = { sentryShots: [], sentryFlashes: [], enemyExplosions: [], teleportEffects: [], tankRamEffects: [], comboEffects: [] };
+    visualEffects = { 
+        sentryShots: [], 
+        sentryFlashes: [], 
+        enemyExplosions: [], 
+        teleportEffects: [], 
+        tankRamEffects: [], 
+        comboEffects: [],
+        achievementEffects: [],
+        hubUpgradeEffects: [],
+        taxEffects: [],
+        waveEffects: [],
+        eventEffects: []
+    };
     
     // Сброс статистики и логов
     gameStats = {
         enemiesKilled: 0,
         nodesCaptured: 0,
-        startTime: Date.now()
+        startTime: Date.now(),
+        wavesCompleted: 0,
+        maxCombo: 0,
+        totalDamageDealt: 0,
+        totalDamageTaken: 0,
+        achievements: {
+            masterMiner: false,
+            networkDefender: false,
+            enemyHunter: false,
+            hubMaster: false,
+            antiExeMaster: false,
+            longSurvivor: false,
+            waveMaster: false,
+            comboMaster: false,
+            eventSurvivor: false,
+            perfectWave: false
+        }
     };
     gameLogs = [];
     addGameLog('Новая игра начата', 'success');
+    
+    // Запускаем первую волну
+    startWave(1);
 }
 
 // --- SOUND SYSTEM ---
 const sound = {
     play: function(name) {
-        // TODO: подключить реальные звуки
-        console.log('[SOUND]', name);
+        if (name === 'upgrade') {
+            if (!this.upgradeAudio) {
+                this.upgradeAudio = new Audio('assets/soundfx/upgrade.wav');
+                this.upgradeAudio.volume = 0.7;
+            }
+            const audio = this.upgradeAudio.cloneNode();
+            audio.play();
+        } else if (name === 'sentry_shoot') {
+            if (!this.laserAudio) {
+                this.laserAudio = new Audio('assets/soundfx/laser.wav');
+                this.laserAudio.volume = 0.6;
+            }
+            const audio = this.laserAudio.cloneNode();
+            audio.play();
+        } else {
+            console.log('[SOUND]', name);
+        }
     }
 };
 
 // --- MUSIC SYSTEM ---
 let musicEnabled = false;
-const bgMusic = document.getElementById('bgMusic');
-const musicToggle = document.getElementById('musicToggle');
+let currentMusicIndex = 0;
+let bgMusic1, bgMusic2, musicToggle;
+
+function initAudio() {
+    bgMusic1 = document.getElementById('bgMusic1');
+    bgMusic2 = document.getElementById('bgMusic2');
+    musicToggle = document.getElementById('musicToggle');
+}
+
+// Функция для получения текущего активного аудио элемента
+function getCurrentMusic() {
+    if (!bgMusic1 || !bgMusic2) return null;
+    return currentMusicIndex === 0 ? bgMusic1 : bgMusic2;
+}
+
+// Функция для получения следующего аудио элемента
+function getNextMusic() {
+    if (!bgMusic1 || !bgMusic2) return null;
+    return currentMusicIndex === 0 ? bgMusic2 : bgMusic1;
+}
+
+// Функция для плавного переключения между аудио элементами
+function switchMusic() {
+    const currentMusic = getCurrentMusic();
+    const nextMusic = getNextMusic();
+    
+    if (!currentMusic || !nextMusic) return;
+    
+    // Проверяем, что аудио загружено и воспроизводится
+    if (!currentMusic.duration || currentMusic.paused) return;
+    
+    // Если текущий трек скоро закончится (осталось меньше 0.5 секунды)
+    if (currentMusic.currentTime > currentMusic.duration - 0.5) {
+        // Подготавливаем следующий трек
+        nextMusic.currentTime = 0;
+        
+        // Запускаем следующий трек с небольшой задержкой
+        setTimeout(() => {
+            nextMusic.play().catch(e => console.log('Ошибка переключения музыки'));
+            
+            // Останавливаем текущий трек
+            currentMusic.pause();
+            currentMusic.currentTime = 0;
+            
+            // Переключаем индекс
+            currentMusicIndex = currentMusicIndex === 0 ? 1 : 0;
+        }, 50);
+    }
+}
 
 function toggleMusic() {
+    if (!bgMusic1 || !bgMusic2 || !musicToggle) return;
+    
     if (musicEnabled) {
-        bgMusic.pause();
+        bgMusic1.pause();
+        bgMusic2.pause();
         musicToggle.textContent = '🎵 ВКЛ';
         musicEnabled = false;
     } else {
-        bgMusic.play().catch(e => console.log('Автовоспроизведение заблокировано'));
-        musicToggle.textContent = '🔇 ВЫКЛ';
-        musicEnabled = true;
+        const currentMusic = getCurrentMusic();
+        if (currentMusic) {
+            currentMusic.play().catch(e => console.log('Автовоспроизведение заблокировано'));
+            musicToggle.textContent = '🔇 ВЫКЛ';
+            musicEnabled = true;
+        }
     }
 }
 
 // Инициализация управления музыкой
-if (musicToggle) {
-    musicToggle.addEventListener('click', toggleMusic);
+function initMusicControls() {
+    if (musicToggle) {
+        musicToggle.addEventListener('click', toggleMusic);
+    }
 }
+
+// Предзагрузка аудио для лучшего качества
+function preloadAudio() {
+    if (!bgMusic1 || !bgMusic2) return;
+    bgMusic1.load();
+    bgMusic2.load();
+    
+    // Устанавливаем громкость
+    bgMusic1.volume = 0.7;
+    bgMusic2.volume = 0.7;
+}
+
+// В начало DOMContentLoaded
+document.addEventListener('DOMContentLoaded', () => {
+    initCanvas();
+    if (canvas) {
+        resizeCanvas();
+        // Навешиваем обработчики событий только после инициализации canvas
+        canvas.addEventListener('mousemove', function(e) {
+            if (!canvas) return;
+            const rect = canvas.getBoundingClientRect();
+            const mx = e.clientX - rect.left;
+            const my = e.clientY - rect.top;
+            hoveredNodeId = null;
+            for (const id in gameState.nodes) {
+                const node = gameState.nodes[id];
+                let base = node.type === 'hub' ? 36 : 18;
+                let amp = node.type === 'hub' ? 6 : 1.5;
+                let freq = node.type === 'hub' ? 1.5 : 0.7;
+                let phase = node.randomPhase || 0;
+                let time = performance.now() / 1000;
+                let size = base + Math.sin(time * freq + phase) * amp;
+                if ((mx - node.x) ** 2 + (my - node.y) ** 2 < size * size) {
+                    hoveredNodeId = id;
+                    break;
+                }
+            }
+            // Сброс анимации пути, если наведённая нода изменилась
+            if (hoveredNodeId !== pathAnim.hovered) {
+                pathAnim.hovered = hoveredNodeId;
+                pathAnim.startTime = performance.now();
+                pathAnim.path = null;
+            }
+        });
+        canvas.addEventListener('click', function(e) {
+            if (!canvas || !gameState) return;
+            const rect = canvas.getBoundingClientRect();
+            const mx = e.clientX - rect.left;
+            const my = e.clientY - rect.top;
+            // --- END_SCREEN ---
+            if (gameState.phase === 'END_SCREEN') {
+                // Play Again кнопка
+                const x = canvas.width/2-80, y = canvas.height/2+30, w = 160, h = 44;
+                if (mx >= x && mx <= x+w && my >= y && my <= y+h) {
+                    gameState.phase = 'MENU';
+                    return;
+                }
+            }
+            // --- MENU ---
+            if (gameState.phase === 'MENU') {
+                // Start New Game кнопка
+                const x = canvas.width/2-90, y = canvas.height/2+60, w = 180, h = 48;
+                if (mx >= x && mx <= x+w && my >= y && my <= y+h) {
+                    startNewGame();
+                    gameState.phase = 'PLAYING';
+                    return;
+                }
+            }
+            // --- PLAYING ---
+            if (gameState.phase !== 'PLAYING') return;
+            // EMP Blast
+            if (uiButtons['emp']) {
+                const b = uiButtons['emp'];
+                if (mx >= b.x && mx <= b.x+b.w && my >= b.y && my <= b.y+b.h) {
+                    if (gameState.cpu >= 50 && gameState.empCooldown <= 0) {
+                        gameState.cpu -= 50;
+                        gameState.empCooldown = 8000;
+                        for (const enemy of gameState.enemies) {
+                            enemy.isStunnedUntil = performance.now() + 3500;
+                        }
+                        return;
+                    }
+                }
+            }
+            // UI-кнопки программ
+            for (const key in uiButtons) {
+                const b = uiButtons[key];
+                if (mx >= b.x && mx <= b.x+b.w && my >= b.y && my <= b.y+b.h) {
+                    if (key === 'upgrade' && gameState.selectedNodeId) {
+                        const node = gameState.nodes[gameState.selectedNodeId];
+                        if (node && node.program) {
+                            let baseCost = node.program.type === 'miner' ? 13 : node.program.type === 'anti_exe' ? 20 : 27; // Уменьшено в 1.5 раза
+                            // Прогрессивная стоимость: множитель увеличивается с уровнем
+                            let levelMultiplier = node.program.level <= 3 ? node.program.level : 
+                                                node.program.level <= 5 ? node.program.level * 1.5 : 
+                                                node.program.level * 2; // Для уровня 6+ двойная стоимость
+                            let cost = baseCost * levelMultiplier;
+                            let cpuCost = 5 * node.program.level;
+                            // За один уровень hub можно апгрейдить два раза, но максимальный уровень 6
+                            if (gameState.dp >= cost && gameState.cpu >= cpuCost && node.program.level < Math.min(6, gameState.hubLevel * 2)) {
+                                gameState.dp -= cost;
+                                gameState.cpu -= cpuCost;
+                                node.program.level++;
+                                sound.play('upgrade');
+                                addGameLog(`Апгрейд ${node.program.type} до уровня ${node.program.level}`, 'success');
+                                gameState.selectedNodeId = null;
+                                return;
+                            }
+                        }
+                    }
+                    if (key === 'upgrade_hub' && gameState.selectedNodeId) {
+                        const node = gameState.nodes[gameState.selectedNodeId];
+                        if (node && node.type === 'hub') {
+                            // --- Стоимость апгрейда HUB: увеличенная ---
+                            let cost = 50 * gameState.hubLevel; // Увеличено с 35 до 50
+                            if (gameState.cpu >= cost) {
+                                gameState.cpu -= cost;
+                                gameState.hubLevel++;
+                                sound.play('upgrade');
+                                addGameLog(`Hub апгрейден до уровня ${gameState.hubLevel}`, 'success');
+                                gameState.selectedNodeId = null;
+                                return;
+                            }
+                        }
+                    }
+                    if ((key === 'miner' || key === 'anti_exe' || key === 'sentry') && gameState.selectedNodeId) {
+                        const node = gameState.nodes[gameState.selectedNodeId];
+                        if (node && !node.program && node.owner === 'player') {
+                            let cost = key === 'miner' ? 13 : key === 'anti_exe' ? 20 : 27; // Уменьшено в 1.5 раза
+                            if (gameState.dp >= cost) {
+                                gameState.dp -= cost;
+                                node.program = { type: key, level: 1 };
+                                addGameLog(`Построен ${key} на ноде ${node.id}`, 'success');
+                                gameState.selectedNodeId = null;
+                                return;
+                            }
+                        }
+                    }
+                    if (key === 'overclocker' && gameState.selectedNodeId) {
+                        const node = gameState.nodes[gameState.selectedNodeId];
+                        if (node && node.type === 'cpu_node' && node.owner === 'player') {
+                            if (gameState.dp >= 50) {
+                                            gameState.dp -= 50;
+                            node.program = { type: 'overclocker', level: 1 };
+                            gameState.cpu += 30;
+                            addGameLog('Построен Overclocker', 'success');
+                            gameState.selectedNodeId = null;
+                            return;
+                            }
+                        }
+                    }
+                }
+            }
+            // --- Захват/выделение ноды ---
+            let found = false;
+            for (const id in gameState.nodes) {
+                const node = gameState.nodes[id];
+                let base = node.type === 'hub' ? 36 : 18;
+                let amp = node.type === 'hub' ? 6 : 1.5;
+                let freq = node.type === 'hub' ? 1.5 : 0.7;
+                let phase = node.randomPhase || 0;
+                let time = performance.now() / 1000;
+                let size = base + Math.sin(time * freq + phase) * amp;
+                let dx = mx - node.x, dy = my - node.y;
+                if (dx*dx + dy*dy <= (size+8)*(size+8)) {
+                    // Если клик по своей — просто выделяем
+                    if (node.owner === 'player') {
+                        gameState.selectedNodeId = id;
+                        found = true;
+                        break;
+                    }
+                    // Если клик по нейтральной/вражеской, и есть сосед-союзник — захват
+                    if ((node.owner !== 'player' && !node.isCapturing)) {
+                        let hasPlayerNeighbor = node.neighbors.some(nid => gameState.nodes[nid] && gameState.nodes[nid].owner === 'player');
+                        if (hasPlayerNeighbor && gameState.dp >= 10) {
+                            node.isCapturing = true;
+                            node.captureProgress = 0;
+                            gameState.dp -= 10;
+                            sound.play('capture_start');
+                            addGameLog(`Начат захват ноды ${id}`, 'info');
+                            gameState.selectedNodeId = id;
+                            found = true;
+                            break;
+                        }
+                    }
+                    // В остальных случаях — просто выделяем
+                    gameState.selectedNodeId = id;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) gameState.selectedNodeId = null;
+        });
+    }
+    initAudio();
+    initMusicControls();
+    preloadAudio();
+    // Запускаем игровой цикл только после инициализации
+    mainLoop();
+});
+
+// Проверяем состояние музыки каждые 100мс для плавного переключения
+setInterval(() => {
+    if (musicEnabled) {
+        switchMusic();
+    }
+}, 100);
 
 // --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ВРАГОВ ---
 function getRandomPath(nodesObj, startId, length = 5) {
@@ -1972,5 +3355,351 @@ function recalcAllEnemyPaths() {
     }
 }
 
-mainLoop();
+function findPathBFS(nodesObj, startId, endId) {
+    if (!nodesObj[startId] || !nodesObj[endId]) return [startId];
+    const queue = [[startId]];
+    const visited = new Set();
+    visited.add(startId);
+    
+    while (queue.length > 0) {
+        const path = queue.shift();
+        const current = path[path.length - 1];
+        
+        if (current === endId) return path;
+        
+        const node = nodesObj[current];
+        if (!node) continue;
+        
+        for (const neighborId of node.neighbors) {
+            if (!visited.has(neighborId)) {
+                visited.add(neighborId);
+                const newPath = [...path, neighborId];
+                queue.push(newPath);
+            }
+        }
+    }
+    
+    return [startId];
+}
+
+// --- Система волн врагов ---
+function startWave(waveNumber) {
+    const config = WAVE_CONFIG[waveNumber] || WAVE_CONFIG[10]; // Используем конфиг 10-й волны для более высоких
+    gameState.currentWave = waveNumber;
+    gameState.waveEnemiesSpawned = 0;
+    gameState.waveEnemiesTotal = config.enemies;
+    gameState.waveTimer = 0;
+    gameState.isWaveBreak = false;
+    
+    // Применяем множитель сложности
+    const difficultyMultiplier = config.difficulty;
+    
+    addGameLog(`🌊 Волна ${waveNumber} началась! (${config.enemies} врагов)`, 'info');
+    visualEffects.waveEffects.push({
+        type: 'wave_start',
+        wave: waveNumber,
+        time: performance.now(),
+        duration: 3
+    });
+    
+    // Увеличиваем сложность врагов
+    gameState.enemyDifficultyMultiplier = difficultyMultiplier;
+}
+
+function endWave() {
+    gameState.wavesCompleted++;
+    gameState.isWaveBreak = true;
+    gameState.waveBreakTimer = gameState.waveBreakDuration;
+    
+    // Проверяем достижение "Волна без потерь"
+    const playerNodesAtStart = Object.values(gameState.nodes).filter(n => n.owner === 'player').length;
+    const playerNodesAtEnd = Object.values(gameState.nodes).filter(n => n.owner === 'player').length;
+    
+    if (playerNodesAtEnd >= playerNodesAtStart) {
+        gameStats.achievements.perfectWave = true;
+        createAchievementEffect('🎯 Идеальная волна!');
+        gameState.achievementPoints += 50;
+    }
+    
+    addGameLog(`✅ Волна ${gameState.currentWave} завершена!`, 'success');
+    visualEffects.waveEffects.push({
+        type: 'wave_end',
+        wave: gameState.currentWave,
+        time: performance.now(),
+        duration: 5
+    });
+    
+    // Бонус за завершение волны
+    gameState.dp += 50 + gameState.currentWave * 10;
+    gameState.cpu += 20 + gameState.currentWave * 5;
+    
+    // Проверяем достижение "Мастер волн"
+    if (gameState.wavesCompleted >= 10) {
+        gameStats.achievements.waveMaster = true;
+        createAchievementEffect('🏆 Мастер волн!');
+        gameState.achievementPoints += 100;
+    }
+}
+
+function spawnEnemyForWave(waveNumber) {
+    const config = WAVE_CONFIG[waveNumber] || WAVE_CONFIG[10];
+    const availableTypes = config.types;
+    const enemyType = availableTypes[Math.floor(Math.random() * availableTypes.length)];
+    
+    // Находим подходящую ноду для спавна
+    const spawnableNodes = Object.values(gameState.nodes).filter(n => 
+        n.owner !== 'player' && 
+        n.type !== 'hub' && 
+        !gameState.enemies.some(e => e.currentNodeId === n.id)
+    );
+    
+    if (spawnableNodes.length === 0) return false;
+    
+    const startNode = spawnableNodes[Math.floor(Math.random() * spawnableNodes.length)];
+    
+    // Определяем цель на основе приоритетов врага
+    let targetNode = null;
+    const behavior = ENEMY_BEHAVIORS[enemyType];
+    if (behavior && behavior.targetPriority) {
+        for (const priority of behavior.targetPriority) {
+            if (priority === 'enemy_healing') {
+                // Лекарь ищет раненых врагов
+                const woundedEnemies = gameState.enemies.filter(e => e.health < e.maxHealth * 0.5);
+                if (woundedEnemies.length > 0) {
+                    const woundedEnemy = woundedEnemies[0];
+                    targetNode = gameState.nodes[woundedEnemy.currentNodeId];
+                }
+                break;
+            } else {
+                const targets = Object.values(gameState.nodes).filter(n => 
+                    n.owner === 'player' && 
+                    (priority === 'miner' ? n.program?.type === 'miner' :
+                     priority === 'sentry' ? n.program?.type === 'sentry' :
+                     priority === 'overclocker' ? n.program?.type === 'overclocker' :
+                     priority === 'hub' ? n.type === 'hub' : true)
+                );
+                if (targets.length > 0) {
+                    targetNode = targets[Math.floor(Math.random() * targets.length)];
+                    break;
+                }
+            }
+        }
+    }
+    
+    // Если цель не найдена, выбираем случайную ноду игрока
+    if (!targetNode) {
+        const playerNodes = Object.values(gameState.nodes).filter(n => n.owner === 'player');
+        if (playerNodes.length > 0) {
+            targetNode = playerNodes[Math.floor(Math.random() * playerNodes.length)];
+        }
+    }
+    
+    let path = [startNode.id];
+    if (targetNode) {
+        path = findPathBFS(gameState.nodes, startNode.id, targetNode.id);
+    }
+    
+    const enemy = new Enemy('e' + gameState.enemyIdCounter++, startNode.id, path, enemyType);
+    
+    // Применяем множитель сложности
+    if (gameState.enemyDifficultyMultiplier) {
+        enemy.health *= gameState.enemyDifficultyMultiplier;
+        enemy.speed *= gameState.enemyDifficultyMultiplier;
+    }
+    
+    gameState.enemies.push(enemy);
+    gameState.waveEnemiesSpawned++;
+    
+    // Логируем появление врага
+    const enemyName = behavior ? behavior.name : `Враг (${enemyType})`;
+    addGameLog(`Появился ${enemyName}`, 'warning');
+    
+    return true;
+}
+
+// --- Система случайных событий ---
+function triggerRandomEvent() {
+    if (gameState.activeEvents.length >= 2) return; // Максимум 2 активных события
+    
+    const availableEvents = RANDOM_EVENTS.filter(event => 
+        !gameState.activeEvents.some(active => active.id === event.id)
+    );
+    
+    if (availableEvents.length === 0) return;
+    
+    const event = availableEvents[Math.floor(Math.random() * availableEvents.length)];
+    event.effect(gameState);
+    
+    gameState.activeEvents.push({
+        id: event.id,
+        name: event.name,
+        endTime: performance.now() + event.duration * 1000,
+        duration: event.duration
+    });
+    
+    addGameLog(`🎲 Событие: ${event.name}`, 'event');
+}
+
+function updateRandomEvents(now) {
+    // Проверяем завершение событий
+    gameState.activeEvents = gameState.activeEvents.filter(event => {
+        if (now > event.endTime) {
+            // Событие завершилось
+            addGameLog(`⏰ Событие "${event.name}" завершено`, 'info');
+            return false;
+        }
+        return true;
+    });
+    
+    // Проверяем новые события
+    if (now - gameState.lastEventCheck > gameState.eventCheckInterval * 1000) {
+        if (Math.random() < 0.3) { // 30% шанс события
+            triggerRandomEvent();
+        }
+        gameState.lastEventCheck = now;
+    }
+}
+
+// --- Система комбо ---
+function addComboKill() {
+    const now = performance.now();
+    
+    if (now - gameState.lastKillTime < gameState.comboTimeout) {
+        gameState.comboKills++;
+        gameState.lastKillTime = now;
+        
+        // Бонус за комбо
+        const comboBonus = gameState.comboKills * 5;
+        gameState.dp += comboBonus;
+        gameState.achievementPoints += comboBonus;
+        
+        // Визуальный эффект комбо
+        visualEffects.comboEffects.push({
+            combo: gameState.comboKills,
+            time: now,
+            duration: 2
+        });
+        
+        // Проверяем достижение комбо
+        if (gameState.comboKills >= 10) {
+            gameStats.achievements.comboMaster = true;
+            createAchievementEffect('🔥 Комбо мастер!');
+            gameState.achievementPoints += 200;
+        }
+        
+        addGameLog(`🔥 Комбо x${gameState.comboKills}! (+${comboBonus} DP)`, 'combo');
+    } else {
+        gameState.comboKills = 1;
+        gameState.lastKillTime = now;
+    }
+    
+    // Обновляем максимальное комбо
+    gameStats.maxCombo = Math.max(gameStats.maxCombo, gameState.comboKills);
+}
+
+// --- Расширенная система достижений ---
+function checkExtendedAchievements() {
+    // Проверяем события
+    if (gameState.activeEvents.length >= 5) {
+        gameStats.achievements.eventSurvivor = true;
+        createAchievementEffect('🎲 Выживший событий!');
+        gameState.achievementPoints += 150;
+    }
+    
+    // Проверяем время выживания
+    const gameTime = (Date.now() - gameStats.startTime) / 1000;
+    if (gameTime >= 1200 && !gameStats.achievements.longSurvivor) { // 20 минут
+        gameStats.achievements.longSurvivor = true;
+        createAchievementEffect('⏰ Долгожитель!');
+        gameState.achievementPoints += 300;
+    }
+    
+    // Проверяем урон
+    if (gameStats.totalDamageDealt >= 10000 && !gameStats.achievements.enemyHunter) {
+        gameStats.achievements.enemyHunter = true;
+        createAchievementEffect('💀 Охотник!');
+        gameState.achievementPoints += 100;
+    }
+}
+
+// --- Функции для новых типов врагов ---
+function updateEnemyBehaviors(dt, now) {
+    for (const enemy of gameState.enemies) {
+        if (!enemy) continue;
+        
+        // Лекарь исцеляет других врагов
+        if (enemy.type === 'healer' && now - enemy.lastHealTime > enemy.healCooldown) {
+            const nearbyEnemies = gameState.enemies.filter(e => 
+                e !== enemy && e.health < e.maxHealth * 0.8
+            );
+            
+            if (nearbyEnemies.length > 0) {
+                const target = nearbyEnemies[0];
+                target.health = Math.min(target.health + 20, target.maxHealth);
+                enemy.lastHealTime = now;
+                addGameLog('💚 Лекарь исцелил врага', 'warning');
+            }
+        }
+        
+        // Командир усиливает других врагов
+        if (enemy.type === 'commander') {
+            const nearbyEnemies = gameState.enemies.filter(e => 
+                e !== enemy && e.currentNodeId === enemy.currentNodeId
+            );
+            
+            for (const nearby of nearbyEnemies) {
+                nearby.damageMultiplier = 1.5;
+                nearby.speed *= 1.2;
+            }
+        }
+        
+        // Саботажник отключает программы
+        if (enemy.type === 'saboteur') {
+            const currentNode = gameState.nodes[enemy.currentNodeId];
+            if (currentNode && currentNode.owner === 'player' && currentNode.program) {
+                currentNode.program = null;
+                addGameLog('🛠️ Саботажник отключил программу!', 'warning');
+            }
+        }
+        
+        // ЭМИ отключает Sentry
+        if (enemy.type === 'emp') {
+            const currentNode = gameState.nodes[enemy.currentNodeId];
+            if (currentNode && currentNode.owner === 'player' && currentNode.program && currentNode.program.type === 'sentry') {
+                currentNode.program.empDisabled = performance.now() + 10000; // 10 секунд отключения
+                addGameLog('⚡ ЭМИ отключил Sentry!', 'warning');
+            }
+        }
+        
+        // Рой атакует несколькими единицами
+        if (enemy.type === 'swarm' && enemy.swarmCount > 1) {
+            // Создаем дополнительные единицы роя
+            for (let i = 1; i < enemy.swarmCount; i++) {
+                const swarmEnemy = new Enemy('swarm_' + enemy.id + '_' + i, enemy.currentNodeId, enemy.path, 'swarm');
+                swarmEnemy.health = 20; // Меньше здоровья у единиц роя
+                swarmEnemy.maxHealth = 20;
+                gameState.enemies.push(swarmEnemy);
+            }
+            enemy.swarmCount = 1; // Предотвращаем бесконечное создание
+        }
+    }
+}
+
+// Система перезарядки и перегрева для Sentry
+const SENTRY_MECHANICS = {
+    maxAmmo: 10,           // Максимум патронов
+    reloadTime: 3000,       // Время перезарядки (3 сек)
+    overheatThreshold: 8,   // Порог перегрева
+    overheatCooldown: 5000, // Время остывания (5 сек)
+    burstFire: 3,           // Выстрелов за раз
+    burstDelay: 200         // Задержка между выстрелами в очереди
+};
+
+// Система брони и пробития
+const ARMOR_MECHANICS = {
+    lightArmor: 0.8,        // Легкая броня (-20% урон)
+    mediumArmor: 0.6,       // Средняя броня (-40% урон)
+    heavyArmor: 0.4,        // Тяжелая броня (-60% урон)
+    piercingBonus: 1.5      // Бонус пробития для специальных врагов
+};
  
