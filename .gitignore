@@ -21,7 +21,34 @@ wheels/
 *.egg
 MANIFEST
 
-# Virtual environments
+# PyTorch
+*.pth
+*.pt
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# PEP 582
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
 .env
 .venv
 env/
@@ -29,6 +56,47 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# TensorBoard
+tensorboard_logs/
+tensorboard_logs_enhanced/
+tensorboard_logs_improved/
+tensorboard_logs_light/
+
+# Logs
+*.log
+*.jsonl
+*.txt
+*.npz
+*.zip
+*.tar.gz
+
+# Results
+results/
+eval_logs/
+
+# Models
+*.pkl
+*.h5
+*.model
 
 # IDE
 .vscode/
@@ -46,20 +114,6 @@ venv.bak/
 ehthumbs.db
 Thumbs.db
 
-# Logs
-*.log
-logs/
-
-# Model files (большие файлы)
-*.zip
-!requirements.txt
-
-# Data files
-*.csv
-*.png
-*.jpg
-*.jpeg
-
 # Temporary files
 *.tmp
-*.temp rl_analysis/best_agent.pkl
+*.temp

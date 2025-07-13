@@ -349,6 +349,10 @@ function initializeGame() {
     gameState.lastMinerTick = 0;
     gameState.lastEnemySpawn = 0;
     gameState.enemyIdCounter = 1;
+    
+    // Инициализация переменных для capture web
+    gameState.captureWebStarted = null;
+    gameState.captureWebDuration = 60000; // 60 секунд
 }
 
 function updateGame(deltaTime) {
@@ -357,7 +361,7 @@ function updateGame(deltaTime) {
     gameState.game_time += deltaTime;
 
     // --- Win/Loss Conditions ---
-    if (gameState.traceLevel >= 200) {
+    if (gameState.traceLevel >= 400) {
         gameState.phase = 'END_SCREEN'; 
         gameState.win = false; 
         return;
@@ -378,9 +382,26 @@ function updateGame(deltaTime) {
             return;
         }
     }
-    
+
     // --- Глобальный рост TraceLevel ---
-    gameState.traceLevel += (0.1 + gameState.traceLevel * 0.001) * deltaTime / 1000; // Растет все быстрее
+    let baseTraceGrowth = (0.1 + gameState.traceLevel * 0.001) * deltaTime / 1000;
+    
+    // Замедление от overclocker'ов
+    let overclockerCount = 0;
+    let totalOverclockerLevels = 0;
+    for (const id in gameState.nodes) {
+        const node = gameState.nodes[id];
+        if (node.owner === 'player' && node.program && node.program.type === 'overclocker') {
+            overclockerCount++;
+            totalOverclockerLevels += node.program.level;
+        }
+    }
+    
+    // Каждый уровень overclocker замедляет рост trace на 3%
+    let traceSlowdown = totalOverclockerLevels * 0.03;
+    let finalTraceGrowth = baseTraceGrowth * (1 - traceSlowdown);
+    
+    gameState.traceLevel += finalTraceGrowth;
 
     // --- Логика для каждого узла ---
     for (const id in gameState.nodes) {
@@ -398,6 +419,9 @@ function updateGame(deltaTime) {
                 node.program = null;
                 console.error(`DEBUG: Нода ${id} захвачена!`);
                 gameState.traceLevel += 5; // Значительный штраф за расширение
+                // Снижаем trace level на 20% при захвате новой ноды
+                gameState.traceLevel = Math.max(0, gameState.traceLevel * 0.8);
+                console.error(`DEBUG: Trace level снижен на 20% после захвата ноды ${id}, новый уровень: ${gameState.traceLevel.toFixed(2)}`);
                 if (node.type === 'data_cache') {
                     gameState.dp += 100;
                     node.type = 'data'; // Бонус выдается один раз
@@ -480,7 +504,7 @@ function updateGame(deltaTime) {
             
             const enemy = new Enemy('e' + gameState.enemyIdCounter++, startNode.id, path, enemyType);
             enemy.lastMove = 0; // таймер движения
-            gameState.enemies.push(enemy);
+                gameState.enemies.push(enemy);
         }
         gameState.lastEnemySpawn = 0;
     }
@@ -497,7 +521,7 @@ function updateGame(deltaTime) {
                 if (!path || path.length < 2) path = getRandomPath(gameState.nodes, enemy.currentNodeId, 8);
                 enemy.path = path;
                 enemy.pathStep = 0;
-            }
+}
             continue;
         }
         if (enemy.lastMove === undefined) enemy.lastMove = 0;
@@ -525,12 +549,45 @@ function updateGame(deltaTime) {
         }
     }
     
-    // --- Очистка и таймеры ---
-    const killedEnemies = gameState.enemies.filter(e => e.health <= 0);
-    if(killedEnemies.length > 0) {
-        gameState.traceLevel += 3 * killedEnemies.length;
-        gameState.dp += 15 * killedEnemies.length;
+    // --- Проверка условия для capture web (60% нод захвачено) ---
+    const totalNodes = Object.keys(gameState.nodes).length;
+    const playerNodes = Object.values(gameState.nodes).filter(n => n.owner === 'player').length;
+    const capturePercentage = (playerNodes / totalNodes) * 100;
+    
+    // Если достигли 60% захвата и на hub нет программы capture_web
+    if (capturePercentage >= 60 && gameState.nodes['hub'] && gameState.nodes['hub'].owner === 'player') {
+        const hubNode = gameState.nodes['hub'];
+        if (!hubNode.program || hubNode.program.type !== 'capture_web') {
+            console.error(`DEBUG: Достигнуто 60% захвата! Добавляем capture_web на hub`);
+            hubNode.program = { type: 'capture_web', level: 1 };
+        }
     }
+    
+    // --- Проверка победы в режиме capture web ---
+    if (gameState.phase === 'CAPTURE_WEB_DEFENSE') {
+        const elapsedTime = Date.now() - gameState.captureWebStarted;
+        if (elapsedTime >= gameState.captureWebDuration) {
+            console.error(`DEBUG: Победа! Capture web завершен успешно`);
+        gameState.phase = 'END_SCREEN';
+        gameState.win = true;
+            return;
+    }
+    
+        // Проверяем, не проиграли ли мы (hub захвачен врагами)
+        if (gameState.nodes['hub'].owner !== 'player') {
+            console.error(`DEBUG: Поражение! Hub захвачен врагами во время capture web`);
+        gameState.phase = 'END_SCREEN';
+        gameState.win = false;
+            return;
+        }
+    }
+    
+    // --- Очистка и таймеры ---
+            const killedEnemies = gameState.enemies.filter(e => e.health <= 0);
+        if(killedEnemies.length > 0) {
+            gameState.traceLevel = Math.max(0, gameState.traceLevel - 2 * killedEnemies.length); // Снижаем trace level за убийство врагов
+            gameState.dp += 15 * killedEnemies.length;
+        }
     gameState.enemies = gameState.enemies.filter(e => e.health > 0);
     
     if (gameState.empCooldown > 0) gameState.empCooldown -= deltaTime;
@@ -543,35 +600,50 @@ function updateGame(deltaTime) {
 // --- Действия игрока ---
 function performAction(action) {
     console.error(`DEBUG: performAction вызвана с:`, JSON.stringify(action));
-    if (gameState.phase !== 'PLAYING') return false;
-
+    if (gameState.phase !== 'PLAYING') {
+        return { success: false, reason: `Игра не в фазе PLAYING, текущая фаза: ${gameState.phase}` };
+    }
     const actionType = action.action;
     const targetNodeId = action.targetNodeId;
-    console.error(`DEBUG: actionType=${actionType}, targetNodeId=${targetNodeId}`);
-
+    let result = { success: false, reason: '' };
     switch (actionType) {
+        case 'wait':
+            result = { success: true };
+            break;
         case 'build_miner':
-            return buildProgram('miner', targetNodeId);
+            result = buildProgram('miner', targetNodeId) ? { success: true } : { success: false, reason: 'Не удалось построить miner' };
+            break;
         case 'build_sentry':
-            return buildProgram('sentry', targetNodeId);
+            result = buildProgram('sentry', targetNodeId) ? { success: true } : { success: false, reason: 'Не удалось построить sentry' };
+            break;
         case 'build_shield':
-            return buildProgram('shield', targetNodeId);
+            result = buildProgram('shield', targetNodeId) ? { success: true } : { success: false, reason: 'Не удалось построить shield' };
+            break;
         case 'build_overclocker':
-            return buildProgram('overclocker', targetNodeId);
+            result = buildProgram('overclocker', targetNodeId) ? { success: true } : { success: false, reason: 'Не удалось построить overclocker' };
+            break;
         case 'upgrade':
-            return upgradeProgram(targetNodeId);
+            result = upgradeProgram(targetNodeId) ? { success: true } : { success: false, reason: 'Не удалось апгрейдить программу' };
+            break;
         case 'upgrade_hub':
-            return upgradeHub();
+            result = upgradeHub() ? { success: true } : { success: false, reason: 'Не удалось апгрейдить HUB' };
+            break;
+        case 'capture_web':
+            result = captureWeb() ? { success: true } : { success: false, reason: 'Не удалось выполнить capture web' };
+            break;
         case 'network_capture':
-            return networkCapture();
+            result = networkCapture() ? { success: true } : { success: false, reason: 'Не удалось выполнить network_capture' };
+            break;
         case 'emp_blast':
-            return empBlast();
+            result = empBlast() ? { success: true } : { success: false, reason: 'Не удалось выполнить emp_blast' };
+            break;
         case 'capture':
-            return captureNode(targetNodeId);
+            result = captureNode(targetNodeId) ? { success: true } : { success: false, reason: 'Не удалось захватить ноду' };
+            break;
         default:
-            console.error(`DEBUG: Неизвестный тип действия: ${actionType}`);
-            return false;
+            result = { success: false, reason: `Неизвестный тип действия: ${actionType}` };
     }
+    return result;
 }
 
 function buildProgram(programType, nodeId) {
@@ -624,14 +696,58 @@ function upgradeHub() {
     return true;
 }
 
+function captureWeb() {
+    const hubNode = gameState.nodes['hub'];
+    if (!hubNode || !hubNode.program || hubNode.program.type !== 'capture_web') {
+        return false;
+    }
+    
+    // Проверяем, что захвачено 60% нод
+    const totalNodes = Object.keys(gameState.nodes).length;
+    const playerNodes = Object.values(gameState.nodes).filter(n => n.owner === 'player').length;
+    const capturePercentage = (playerNodes / totalNodes) * 100;
+    
+    if (capturePercentage < 60) {
+        return false;
+    }
+    
+    // Запускаем режим защиты - нужно продержаться 60 секунд
+    gameState.captureWebStarted = Date.now();
+    gameState.captureWebDuration = 60000; // 60 секунд в миллисекундах
+    gameState.phase = 'CAPTURE_WEB_DEFENSE';
+    
+    console.error(`DEBUG: Capture web активирован! Нужно продержаться 60 секунд`);
+    return true;
+}
+
 function networkCapture() {
     if (gameState.dp < 20) return false;
     
     gameState.dp -= 20;
-    gameState.traceLevel++;
+    gameState.traceLevel = Math.max(0, gameState.traceLevel - 10); // Увеличиваем снижение trace
     
-    // Бонус за network capture
-    gameState.dp += 10;
+    // Проверяем условие победы через network capture
+    const totalNodes = Object.keys(gameState.nodes).length;
+    const playerNodes = Object.values(gameState.nodes).filter(n => n.owner === 'player').length;
+    const capturePercentage = (playerNodes / totalNodes) * 100;
+    
+    // Победа через network capture при 70% захвата и низком trace
+    if (capturePercentage >= 70 && gameState.traceLevel < 100) {
+        console.error(`DEBUG: Победа через Network Capture! Захват: ${capturePercentage.toFixed(1)}%, Trace: ${gameState.traceLevel.toFixed(2)}`);
+        gameState.phase = 'END_SCREEN';
+        gameState.win = true;
+        return true;
+    }
+    
+    // Стратегические бонусы
+    gameState.dp += 20; // Увеличиваем бонус
+    gameState.cpu += 10; // Увеличиваем CPU бонус
+    
+    // Дополнительный бонус за низкий trace level
+    if (gameState.traceLevel < 100) {
+        gameState.dp += 15; // Увеличиваем бонус за скрытность
+    }
+    
     return true;
 }
 
@@ -642,10 +758,15 @@ function empBlast() {
     gameState.cpu -= 50;
     gameState.empCooldown = 8000; // 8 секунд
 
-    // Оглушаем всех врагов
+    // Оглушаем всех врагов на более долгое время
     for (const enemy of gameState.enemies) {
-        enemy.isStunnedUntil = Date.now() + 3500;
+        enemy.isStunnedUntil = Date.now() + 5000; // Увеличиваем время оглушения
     }
+    
+    // Стратегические бонусы за EMP blast
+    gameState.traceLevel = Math.max(0, gameState.traceLevel - 3); // Небольшое снижение trace
+    gameState.dp += 20; // Бонус за успешную атаку
+    
     return true;
 }
 
@@ -683,6 +804,22 @@ function captureNode(nodeId) {
     return true;
 }
 
+// --- Получение захватываемых нод ---
+function get_capturable_nodes() {
+    const capturable = [];
+    for (const nodeId in gameState.nodes) {
+        const node = gameState.nodes[nodeId];
+        if (node.owner === 'neutral') {
+            // Проверяем, есть ли сосед-союзник
+            let hasPlayerNeighbor = node.neighbors.some(nid => gameState.nodes[nid] && gameState.nodes[nid].owner === 'player');
+            if (hasPlayerNeighbor) {
+                capturable.push(nodeId);
+            }
+        }
+    }
+    return capturable;
+}
+
 // --- Получение состояния игры ---
 function getGameState() {
     const stats = {
@@ -708,54 +845,78 @@ function getGameState() {
 
 // --- Получение возможных действий ---
 function getPossibleActions() {
-    const actions = ['wait'];
+    const actions = [{action: 'wait'}];
     
-    // Проверяем возможность строительства
+    // Строительство
     for (const nodeId in gameState.nodes) {
         const node = gameState.nodes[nodeId];
         if (node.owner === 'player' && !node.program) {
-            actions.push('build_miner');
-            actions.push('build_sentry');
-            actions.push('build_shield');
-            if (node.type === 'cpu_node') {
-                actions.push('build_overclocker');
+            // Проверяем условия для каждой программы
+            if (gameState.dp >= 20) {
+                actions.push({action: 'build_miner', targetNodeId: nodeId});
+            }
+            if (gameState.dp >= 40) {
+                actions.push({action: 'build_sentry', targetNodeId: nodeId});
+            }
+            if (gameState.dp >= 30) {
+                actions.push({action: 'build_shield', targetNodeId: nodeId});
+            }
+            if (node.type === 'cpu_node' && gameState.dp >= 50) {
+                actions.push({action: 'build_overclocker', targetNodeId: nodeId});
             }
         }
     }
 
-    // Проверяем возможность апгрейда
+    // Апгрейд
     for (const nodeId in gameState.nodes) {
         const node = gameState.nodes[nodeId];
         if (node.owner === 'player' && node.program) {
-            actions.push('upgrade');
-        }
-    }
-
-    // Проверяем возможность захвата
-    for (const nodeId in gameState.nodes) {
-        const node = gameState.nodes[nodeId];
-        if (node.owner === 'neutral') {
-            // Проверяем, есть ли сосед-союзник
-            let hasPlayerNeighbor = node.neighbors.some(nid => gameState.nodes[nid] && gameState.nodes[nid].owner === 'player');
-            if (hasPlayerNeighbor) {
-                actions.push('capture');
+            // Проверяем, можно ли реально апгрейдить программу
+            let baseCost = node.program.type === 'miner' ? 20 : node.program.type === 'shield' ? 30 : 40;
+            let cost = baseCost * node.program.level;
+            let cpuCost = 5 * node.program.level;
+            
+            // Проверяем все условия для апгрейда
+            if (gameState.dp >= cost && gameState.cpu >= cpuCost && node.program.level < gameState.hubLevel) {
+                actions.push({action: 'upgrade', targetNodeId: nodeId});
             }
         }
     }
 
-    // Проверяем возможность network capture
+    // Захват
+    for (const nodeId in gameState.nodes) {
+        const node = gameState.nodes[nodeId];
+        if (node.owner === 'neutral') {
+            let hasPlayerNeighbor = node.neighbors.some(nid => gameState.nodes[nid] && gameState.nodes[nid].owner === 'player');
+            if (hasPlayerNeighbor && gameState.dp >= 10) {
+                actions.push({action: 'capture', targetNodeId: nodeId});
+            }
+        }
+    }
+
+    // Стратегические действия
     if (gameState.dp >= 20) {
-        actions.push('network_capture');
+        actions.push({action: 'network_capture'});
     }
-
-    // Проверяем возможность EMP blast
     if (gameState.empCooldown <= 0 && gameState.cpu >= 50) {
-        actions.push('emp_blast');
+        actions.push({action: 'emp_blast'});
     }
-
-    // Проверяем возможность апгрейда hub
-    if (gameState.cpu >= gameState.hubLevel * 30) {
-        actions.push('upgrade_hub');
+    // Проверяем условия для апгрейда hub
+    let hubCost = 30 * gameState.hubLevel;
+    const hubNode = gameState.nodes['hub'];
+    
+    // Hub можно апгрейдить только если на нем есть программа
+    if (gameState.cpu >= hubCost && hubNode && hubNode.program) {
+        actions.push({action: 'upgrade_hub'});
+    }
+    
+    // Проверяем условие для capture web (60% нод захвачено)
+    const totalNodes = Object.keys(gameState.nodes).length;
+    const playerNodes = Object.values(gameState.nodes).filter(n => n.owner === 'player').length;
+    const capturePercentage = (playerNodes / totalNodes) * 100;
+    
+    if (capturePercentage >= 60 && hubNode && hubNode.program && hubNode.program.type === 'capture_web') {
+        actions.push({action: 'capture_web'});
     }
 
     return actions;
@@ -767,19 +928,54 @@ function reset() {
     return getGameState();
 }
 
-function step(action) {
-    console.error(`DEBUG: step вызвана с действием:`, JSON.stringify(action));
-    const success = performAction(action.action);
-    console.error(`DEBUG: performAction вернул:`, success);
+function step(command) {
+    console.error(`DEBUG: step вызвана с действием: ${JSON.stringify(command)}`);
+    let executed_actions = [];
+    let success = false;
+
+    if (Array.isArray(command.actions)) {
+        // Обрабатываем массив действий
+        for (const action of command.actions) {
+            console.error(`DEBUG: Выполняем действие: ${JSON.stringify(action)}`);
+            let res = performAction(action);
+            executed_actions.push({
+                action: action,
+                success: res.success,
+                reason: res.reason || '',
+                executed: res.success
+            });
+            console.error(`DEBUG: Результат выполнения: ${res.success}`);
+        }
+        success = executed_actions.some(r => r.success);
+    } else if (command.action) {
+        // Обрабатываем одиночное действие (для обратной совместимости)
+        let res = performAction(command.action);
+        executed_actions.push({
+            action: command.action,
+            success: res.success,
+            reason: res.reason || '',
+            executed: res.success
+        });
+        success = res.success;
+    }
+
     const reward = success ? 1 : -1;
-    
     updateGame(16); // 60 FPS
+    
+    console.error(`DEBUG: Возвращаем результат: ${JSON.stringify({
+        newState: getGameState(),
+        reward: reward,
+        done: gameState.phase === 'END_SCREEN',
+        win: gameState.win,
+        performedActions: executed_actions
+    })}`);
     
     return {
         newState: getGameState(),
         reward: reward,
         done: gameState.phase === 'END_SCREEN',
-        win: gameState.win
+        win: gameState.win,
+        executed_actions: executed_actions
     };
 }
 
@@ -794,6 +990,8 @@ function handleCommand(command) {
             return getGameState();
         case 'get_actions':
             return { actions: getPossibleActions() };
+        case 'get_capturable_nodes':
+            return { capturable_nodes: get_capturable_nodes() };
         default:
             return { error: 'Unknown command' };
     }
