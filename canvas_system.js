@@ -91,6 +91,196 @@ let gameStats = {
     }
 };
 
+// --- КЛАССЫ (объявляем в начале) ---
+
+// Класс для групповых атак врагов
+class EnemyGroup {
+    constructor(members, targetNodeId) {
+        this.members = members;
+        this.targetNodeId = targetNodeId;
+        this.state = 'gathering'; // gathering, waiting, attacking, disbanded
+        this.gatherPoint = this.findGatherPoint(targetNodeId);
+        this.waitStartTime = 0;
+        this.maxWaitTime = 5000; // 5 секунд максимум ожидания
+        this.attackCooldown = 0;
+        
+        // Назначаем роли членам группы
+        this.assignRoles();
+    }
+    
+    findGatherPoint(targetNodeId) {
+        const targetNode = gameState.nodes[targetNodeId];
+        if (!targetNode) return null;
+        
+        // Ищем ближайшую безопасную точку для сбора
+        let bestPoint = null;
+        let bestDistance = Infinity;
+        
+        for (const nodeId in gameState.nodes) {
+            const node = gameState.nodes[nodeId];
+            const distance = getDistance(node.x, node.y, targetNode.x, targetNode.y);
+            
+            // Предпочитаем точки на безопасном расстоянии от цели
+            if (distance > 100 && distance < 300 && distance < bestDistance) {
+                bestPoint = nodeId;
+                bestDistance = distance;
+            }
+        }
+        
+        return bestPoint || targetNodeId;
+    }
+    
+    assignRoles() {
+        if (this.members.length === 0) return;
+        
+        // Назначаем роли в зависимости от типа врагов
+        this.members.forEach((enemy, index) => {
+            if (enemy.type === 'tank') {
+                enemy.role = 'tank';
+            } else if (enemy.type === 'healer') {
+                enemy.role = 'healer';
+            } else if (enemy.type === 'saboteur') {
+                enemy.role = 'saboteur';
+            } else if (enemy.type === 'bomber') {
+                enemy.role = 'sacrifice';
+            } else {
+                enemy.role = 'damager';
+            }
+        });
+    }
+    
+    allAtGatherPoint() {
+        return this.members.every(enemy => {
+            const gatherNode = gameState.nodes[this.gatherPoint];
+            const enemyNode = gameState.nodes[enemy.currentNodeId];
+            if (!gatherNode || !enemyNode) return false;
+            
+            const distance = getDistance(enemyNode.x, enemyNode.y, gatherNode.x, gatherNode.y);
+            return distance < 50;
+        });
+    }
+    
+    waitedTooLong() {
+        return this.waitStartTime > 0 && (performance.now() - this.waitStartTime) > this.maxWaitTime;
+    }
+    
+    groupDestroyed() {
+        return this.members.every(enemy => enemy.health <= 0);
+    }
+    
+    reachedTarget() {
+        return this.members.some(enemy => enemy.currentNodeId === this.targetNodeId);
+    }
+    
+    coordinateAttack() {
+        // Синхронизированная атака
+        this.members.forEach(enemy => {
+            if (enemy.health > 0) {
+                enemy.attackCooldown = 0;
+                enemy.isAttacking = true;
+            }
+        });
+        
+        // Визуальный эффект групповой атаки
+        visualEffects.groupAttackEffects.push({
+            type: 'coordinated_attack',
+            targetNodeId: this.targetNodeId,
+            time: performance.now(),
+            duration: 2000
+        });
+    }
+    
+    update(dt) {
+        if (this.state === 'disbanded') return;
+        
+        // Удаляем мертвых членов группы
+        this.members = this.members.filter(enemy => enemy.health > 0);
+        
+        if (this.members.length === 0) {
+            this.state = 'disbanded';
+            return;
+        }
+        
+        switch (this.state) {
+            case 'gathering':
+                // Все враги движутся к точке сбора
+                this.members.forEach(enemy => {
+                    if (enemy.health > 0) {
+                        enemy.targetNodeId = this.gatherPoint;
+                    }
+                });
+                
+                if (this.allAtGatherPoint()) {
+                    this.state = 'waiting';
+                    this.waitStartTime = performance.now();
+                }
+                break;
+                
+            case 'waiting':
+                // Ждем, пока все соберутся
+                if (this.waitedTooLong()) {
+                    this.state = 'attacking';
+                }
+                break;
+                
+            case 'attacking':
+                // Координированная атака
+                this.members.forEach(enemy => {
+                    if (enemy.health > 0) {
+                        enemy.targetNodeId = this.targetNodeId;
+                    }
+                });
+                
+                if (this.reachedTarget()) {
+                    this.coordinateAttack();
+                    this.state = 'disbanded';
+                }
+                break;
+        }
+    }
+}
+
+// Менеджер групповых атак
+class EnemyGroupManager {
+    constructor() {
+        this.groups = [];
+        this.lastGroupFormation = 0;
+        this.groupFormationCooldown = 10000; // 10 секунд между формированиями групп
+        this.maxGroupSize = 4;
+        this.minGroupSize = 2;
+    }
+    
+    canFormGroup() {
+        return (performance.now() - this.lastGroupFormation) > this.groupFormationCooldown;
+    }
+    
+    formGroup(enemies, targetNodeId) {
+        if (!this.canFormGroup() || enemies.length < this.minGroupSize) {
+            return null;
+        }
+        
+        // Ограничиваем размер группы
+        const groupMembers = enemies.slice(0, this.maxGroupSize);
+        
+        const group = new EnemyGroup(groupMembers, targetNodeId);
+        this.groups.push(group);
+        this.lastGroupFormation = performance.now();
+        
+        return group;
+    }
+    
+    update(dt) {
+        // Обновляем все группы
+        this.groups = this.groups.filter(group => {
+            group.update(dt);
+            return group.state !== 'disbanded';
+        });
+    }
+}
+
+// Создаем глобальный экземпляр менеджера групп
+const enemyGroupManager = new EnemyGroupManager();
+
 // Система волн врагов
 const WAVE_CONFIG = {
     1: { enemies: 5, types: ['patrol'], difficulty: 1.0 },
@@ -2605,7 +2795,88 @@ function render() {
         ctx.restore();
     }
     visualEffects.comboEffects = visualEffects.comboEffects.filter(effect => (performance.now() - effect.time) < effect.duration * 1000);
+
+    // --- Визуализация групповых атак ---
+    drawGroupAttackIndicators(ctx);
 }
+
+// --- Визуализация групповых атак ---
+function drawGroupAttackIndicators(ctx) {
+    if (!EnemyGroupManager || !EnemyGroupManager.groups) return;
+    ctx.save();
+    for (const group of EnemyGroupManager.groups) {
+        if (group.state === 'attacking' || group.state === 'gathering') {
+            // Рисуем стрелку от точки сбора к цели
+            const gatherNode = gameState.nodes[group.gatherPoint];
+            const targetNode = gameState.nodes[group.targetNodeId];
+            if (gatherNode && targetNode) {
+                ctx.strokeStyle = '#ff1744';
+                ctx.lineWidth = 4;
+                ctx.globalAlpha = 0.7;
+                ctx.beginPath();
+                ctx.moveTo(gatherNode.x, gatherNode.y);
+                ctx.lineTo(targetNode.x, targetNode.y);
+                ctx.stroke();
+                // Рисуем маркер цели
+                ctx.globalAlpha = 0.9;
+                ctx.beginPath();
+                ctx.arc(targetNode.x, targetNode.y, 22, 0, 2 * Math.PI);
+                ctx.strokeStyle = '#ffd600';
+                ctx.lineWidth = 3;
+                ctx.stroke();
+                ctx.globalAlpha = 1.0;
+            }
+        }
+    }
+    ctx.restore();
+}
+
+// --- Улучшенное поведение врагов внутри группы ---
+EnemyGroup.prototype.coordinateAttack = function() {
+    // Танки идут впереди, дамагеры и хилеры позади
+    const tankTypes = ['tank', 'juggernaut', 'shield'];
+    const supportTypes = ['healer', 'commander'];
+    const dpsTypes = ['hunter', 'patrol', 'blitzer', 'saboteur', 'bomber', 'infector', 'emp', 'stealth', 'swarm'];
+    // Определяем позицию танка
+    let tank = this.members.find(e => tankTypes.includes(e.type) && e.health > 0);
+    for (const enemy of this.members) {
+        if (enemy.health <= 0) continue;
+        if (tank && enemy !== tank) {
+            // Держаться на 1-2 ноды позади танка
+            const tankNode = gameState.nodes[tank.currentNodeId];
+            const enemyNode = gameState.nodes[enemy.currentNodeId];
+            if (tankNode && enemyNode) {
+                const dist = getDistance(tankNode.x, tankNode.y, enemyNode.x, enemyNode.y);
+                if (dist < 30) {
+                    // Если слишком близко — не двигаться вперёд
+                    enemy.pauseMovement = true;
+                } else {
+                    enemy.pauseMovement = false;
+                }
+            }
+        } else {
+            enemy.pauseMovement = false;
+        }
+    }
+    // Хилер лечит только если рядом союзник с < 50% HP
+    for (const enemy of this.members) {
+        if (supportTypes.includes(enemy.type) && enemy.health > 0) {
+            for (const ally of this.members) {
+                if (ally !== enemy && ally.health > 0 && ally.health < ally.maxHealth * 0.5) {
+                    enemy.shouldHeal = true;
+                    break;
+                }
+            }
+        }
+    }
+};
+
+// --- Вызов визуализации в render ---
+const originalRender = render;
+render = function() {
+    originalRender();
+    drawGroupAttackIndicators(ctx);
+};
 
 // В начало update
 function update(dt, now) {
@@ -2970,6 +3241,7 @@ function update(dt, now) {
                         node.owner = 'neutral'; node.program = null; node.captureProgress = 0;
                         if(gameState.selectedNodeId === node.id) gameState.selectedNodeId = null;
                         triggerScreenShake(7, 250); sound.play('node_lost');
+                        destroyIsolatedNetworkChunks();
                     }
                 }
             }
@@ -4042,7 +4314,15 @@ function updateEnemyBehaviors(dt, now) {
                     if (alternativePath && alternativePath.length > 0) {
                         enemy.path = alternativePath;
                         enemy.pathStep = 0;
-                        addGameLog(`🔄 ${enemy.name || 'Враг'} обходит угрозу`, 'info');
+                        if (!enemy.isBypassingThreat) {
+                            addGameLog(`🔄 ${enemy.name || 'Враг'} обходит угрозу`, 'info');
+                            enemy.isBypassingThreat = true;
+                        }
+                    }
+                } else {
+                    // Если враг больше не обходит угрозу, сбрасываем флаг
+                    if (enemy.isBypassingThreat) {
+                        enemy.isBypassingThreat = false;
                     }
                 }
             }
@@ -4402,4 +4682,59 @@ function drawEnemyInfo(ctx, enemy) {
     
     ctx.restore();
 }
+
+// --- Функция поиска и разрушения отсоединённых кусков сети ---
+function destroyIsolatedNetworkChunks() {
+    const nodes = gameState.nodes;
+    const hubId = gameState.playerRootNodeId || 'hub';
+    const visited = new Set();
+    // BFS от hub
+    const queue = [hubId];
+    visited.add(hubId);
+    while (queue.length > 0) {
+        const current = queue.shift();
+        const node = nodes[current];
+        if (!node) continue;
+        for (const neighborId of node.neighbors) {
+            if (!visited.has(neighborId)) {
+                const neighbor = nodes[neighborId];
+                if (neighbor && neighbor.owner === 'player') {
+                    visited.add(neighborId);
+                    queue.push(neighborId);
+                }
+            }
+        }
+    }
+    // Все player-ноды, не посещённые — изолированы
+    let lostNodes = [];
+    let lostPrograms = 0;
+    for (const nodeId in nodes) {
+        const node = nodes[nodeId];
+        if (node.owner === 'player' && !visited.has(nodeId)) {
+            lostNodes.push(nodeId);
+            if (node.program) lostPrograms++;
+        }
+    }
+    if (lostNodes.length === 0) return;
+    // Применяем штраф
+    const percentPenalty = 0.1; // 10%
+    const dpPenalty = Math.round(gameState.dp * percentPenalty) + lostNodes.length * 10 + lostPrograms * 20;
+    const cpuPenalty = Math.round(gameState.cpu * percentPenalty) + lostPrograms * 5;
+    gameState.dp = Math.max(0, gameState.dp - dpPenalty);
+    gameState.cpu = Math.max(0, gameState.cpu - cpuPenalty);
+    // Уничтожаем изолированные ноды
+    for (const nodeId of lostNodes) {
+        nodes[nodeId].owner = 'neutral';
+        nodes[nodeId].program = null;
+        // Можно добавить визуальный эффект разрушения
+        visualEffects.enemyExplosions.push({x: nodes[nodeId].x, y: nodes[nodeId].y, time: performance.now()});
+    }
+    addGameLog(`⚠️ Часть сети уничтожена! Потери: -${dpPenalty} DP, -${cpuPenalty} CPU`, 'warning');
+}
+
+// --- ВСТАВИТЬ В МЕСТО ЗАХВАТА/РАЗРУШЕНИЯ НОДЫ ВРАГОМ ---
+// После node.owner = 'enemy' или разрушения программы:
+// destroyIsolatedNetworkChunks();
+
+
  
