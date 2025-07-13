@@ -20,7 +20,13 @@ let gameState = {
     hubLevel: 1,
 };
 let uiButtons = {};
-let visualEffects = { sentryShots: [], sentryFlashes: [], enemyExplosions: [] };
+let visualEffects = { sentryShots: [], sentryFlashes: [], enemyExplosions: [], teleportEffects: [], tankRamEffects: [], comboEffects: [] };
+let gameLogs = [];
+let gameStats = {
+    enemiesKilled: 0,
+    nodesCaptured: 0,
+    startTime: Date.now()
+};
 let screenShake = { duration: 0, magnitude: 0 };
 let godMode = false;
 let lastTimestamp = 0;
@@ -30,11 +36,22 @@ let hoveredNodeId = null;
 // --- CANVAS NETWORK SYSTEM ---
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
-canvas.width = window.innerWidth;
-canvas.height = window.innerHeight;
+// Адаптивный размер canvas
+function resizeCanvas() {
+    const container = document.getElementById('game-area');
+    if (container) {
+        const rect = container.getBoundingClientRect();
+        canvas.width = rect.width;
+        canvas.height = rect.height;
+    } else {
+        canvas.width = 1000;
+        canvas.height = 700;
+    }
+}
+
+resizeCanvas();
 window.addEventListener('resize', () => {
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
+    resizeCanvas();
     render();
 });
 
@@ -70,8 +87,45 @@ class Enemy {
         this.path = path; // массив id
         this.pathStep = 0;
         this.decapturing = false;
-        this.health = type === 'hunter' ? 90 : 50; // больше здоровья у hunter
         this.type = type;
+        
+        // Настройки здоровья для разных типов врагов
+        switch(type) {
+            case 'hunter':
+                this.health = 90;
+                this.speed = 1.0;
+                break;
+            case 'patrol':
+                this.health = 50;
+                this.speed = 1.0;
+                break;
+            case 'infector':
+                this.health = 40;
+                this.speed = 0.8;
+                this.infectionRadius = 150;
+                this.infectionDamage = 2;
+                break;
+            case 'blitzer':
+                this.health = 30;
+                this.speed = 2.5;
+                this.teleportCooldown = 0;
+                this.teleportRange = 200;
+                break;
+            case 'tank':
+                this.health = 200;
+                this.speed = 0.8;
+                this.armor = 0.7; // Снижение урона на 30%
+                this.ramDamage = 50;
+                break;
+            default:
+                this.health = 50;
+                this.speed = 1.0;
+        }
+        
+        // Дополнительные свойства
+        this.lastMove = 0;
+        this.isStunnedUntil = 0;
+        this.armor = this.armor || 1.0;
     }
 }
 
@@ -485,6 +539,7 @@ canvas.addEventListener('click', function(e) {
                         gameState.cpu -= cpuCost;
                         node.program.level++;
                         sound.play('upgrade');
+                        addGameLog(`Апгрейд ${node.program.type} до уровня ${node.program.level}`, 'success');
                         gameState.selectedNodeId = null;
                         return;
                     }
@@ -499,6 +554,7 @@ canvas.addEventListener('click', function(e) {
                         gameState.cpu -= cost;
                         gameState.hubLevel++;
                         sound.play('upgrade');
+                        addGameLog(`Hub апгрейден до уровня ${gameState.hubLevel}`, 'success');
                         gameState.selectedNodeId = null;
                         return;
                     }
@@ -511,6 +567,7 @@ canvas.addEventListener('click', function(e) {
                     if (gameState.dp >= cost) {
                         gameState.dp -= cost;
                         node.program = { type: key, level: 1 };
+                        addGameLog(`Построен ${key} на ноде ${node.id}`, 'success');
                         gameState.selectedNodeId = null;
                         return;
                     }
@@ -520,11 +577,12 @@ canvas.addEventListener('click', function(e) {
                 const node = gameState.nodes[gameState.selectedNodeId];
                 if (node && node.type === 'cpu_node' && node.owner === 'player') {
                     if (gameState.dp >= 50) {
-                        gameState.dp -= 50;
-                        node.program = { type: 'overclocker', level: 1 };
-                        gameState.cpu += 30;
-                        gameState.selectedNodeId = null;
-                        return;
+                                            gameState.dp -= 50;
+                    node.program = { type: 'overclocker', level: 1 };
+                    gameState.cpu += 30;
+                    addGameLog('Построен Overclocker', 'success');
+                    gameState.selectedNodeId = null;
+                    return;
                     }
                 }
             }
@@ -556,6 +614,7 @@ canvas.addEventListener('click', function(e) {
                     node.captureProgress = 0;
                     gameState.dp -= 10;
                     sound.play('capture_start');
+                    addGameLog(`Начат захват ноды ${id}`, 'info');
                     gameState.selectedNodeId = id;
                     found = true;
                     break;
@@ -615,20 +674,43 @@ function drawConnection(ctx, n1, n2, time) {
 
 function drawEnemy(ctx, node, type, enemy) {
     ctx.save();
-    ctx.beginPath();
-    ctx.arc(node.x, node.y, 13, 0, 2 * Math.PI);
-    if (type === 'hunter') { ctx.fillStyle = '#b388ff'; ctx.shadowColor = '#b388ff'; }
-    else { ctx.fillStyle = '#ff1744'; ctx.shadowColor = '#ff1744'; }
-    ctx.shadowBlur = 16;
-    ctx.globalAlpha = 0.85;
-    ctx.fill();
-    ctx.shadowBlur = 0;
-    ctx.globalAlpha = 1;
-    ctx.font = 'bold 15px sans-serif';
-    ctx.fillStyle = '#fff';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(type === 'hunter' ? 'H' : 'E', node.x, node.y+1);
+    
+    // Рисуем основную форму врага в зависимости от типа
+    switch(type) {
+        case 'hunter':
+            drawHunterIcon(ctx, node.x, node.y);
+            break;
+        case 'patrol':
+            drawPatrolIcon(ctx, node.x, node.y);
+            break;
+        case 'infector':
+            drawInfectorIcon(ctx, node.x, node.y);
+            break;
+        case 'blitzer':
+            drawBlitzerIcon(ctx, node.x, node.y);
+            break;
+        case 'tank':
+            drawTankIcon(ctx, node.x, node.y);
+            break;
+        default:
+            // Стандартная отрисовка для неизвестных типов
+            ctx.beginPath();
+            ctx.arc(node.x, node.y, 13, 0, 2 * Math.PI);
+            ctx.fillStyle = '#ff1744';
+            ctx.shadowColor = '#ff1744';
+            ctx.shadowBlur = 16;
+            ctx.globalAlpha = 0.85;
+            ctx.fill();
+            ctx.shadowBlur = 0;
+            ctx.globalAlpha = 1;
+            ctx.font = 'bold 15px sans-serif';
+            ctx.fillStyle = '#fff';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('E', node.x, node.y+1);
+    }
+    
+    // Эффект оглушения для всех типов
     if (enemy && enemy.isStunnedUntil && enemy.isStunnedUntil > performance.now()) {
         ctx.save();
         ctx.globalAlpha = 0.7;
@@ -645,6 +727,220 @@ function drawEnemy(ctx, node, type, enemy) {
         }
         ctx.restore();
     }
+    
+    ctx.restore();
+}
+
+// Функции отрисовки иконок врагов
+function drawHunterIcon(ctx, x, y) {
+    ctx.save();
+    // Основное тело - темно-красный круг с градиентом
+    const gradient = ctx.createRadialGradient(x, y, 0, x, y, 12);
+    gradient.addColorStop(0, '#FF1744');
+    gradient.addColorStop(1, '#8B0000');
+    
+    ctx.fillStyle = gradient;
+    ctx.shadowColor = '#FF1744';
+    ctx.shadowBlur = 15;
+    ctx.beginPath();
+    ctx.arc(x, y, 12, 0, 2 * Math.PI);
+    ctx.fill();
+    
+    // Символ "H" в центре
+    ctx.fillStyle = '#FFFFFF';
+    ctx.shadowBlur = 0;
+    ctx.font = 'bold 14px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('H', x, y);
+    
+    // Пульсирующий эффект
+    const pulse = Math.sin(performance.now() / 200) * 0.3 + 0.7;
+    ctx.globalAlpha = pulse;
+    ctx.strokeStyle = '#FF1744';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(x, y, 15, 0, 2 * Math.PI);
+    ctx.stroke();
+    
+    ctx.restore();
+}
+
+function drawPatrolIcon(ctx, x, y) {
+    ctx.save();
+    // Тело - фиолетовый квадрат с закругленными углами
+    const gradient = ctx.createLinearGradient(x-10, y-10, x+10, y+10);
+    gradient.addColorStop(0, '#9C27B0');
+    gradient.addColorStop(1, '#4A148C');
+    
+    ctx.fillStyle = gradient;
+    ctx.shadowColor = '#9C27B0';
+    ctx.shadowBlur = 12;
+    ctx.beginPath();
+    ctx.roundRect(x-10, y-10, 20, 20, 4);
+    ctx.fill();
+    
+    // Символ "P" в центре
+    ctx.fillStyle = '#FFFFFF';
+    ctx.shadowBlur = 0;
+    ctx.font = 'bold 14px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('P', x, y);
+    
+    // Вращающиеся точки по углам
+    const time = performance.now() / 1000;
+    const points = [
+        {x: x-6, y: y-6}, {x: x+6, y: y-6},
+        {x: x-6, y: y+6}, {x: x+6, y: y+6}
+    ];
+    
+    points.forEach((point, i) => {
+        const angle = time + i * Math.PI / 2;
+        const pulse = Math.sin(angle * 3) * 0.5 + 0.5;
+        ctx.globalAlpha = pulse;
+        ctx.fillStyle = '#FFD600';
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, 2, 0, 2 * Math.PI);
+        ctx.fill();
+    });
+    
+    ctx.restore();
+}
+
+function drawInfectorIcon(ctx, x, y) {
+    ctx.save();
+    // Центральное ядро - зеленый треугольник
+    const gradient = ctx.createRadialGradient(x, y, 0, x, y, 12);
+    gradient.addColorStop(0, '#00FF41');
+    gradient.addColorStop(1, '#00E676');
+    
+    ctx.fillStyle = gradient;
+    ctx.shadowColor = '#00FF41';
+    ctx.shadowBlur = 10;
+    ctx.beginPath();
+    ctx.moveTo(x, y-12);
+    ctx.lineTo(x-10, y+8);
+    ctx.lineTo(x+10, y+8);
+    ctx.closePath();
+    ctx.fill();
+    
+    // Символ "I" в центре
+    ctx.fillStyle = '#FFFFFF';
+    ctx.shadowBlur = 0;
+    ctx.font = 'bold 14px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('I', x, y);
+    
+    // Пульсирующие точки вокруг
+    const time = performance.now() / 1000;
+    for (let i = 0; i < 6; i++) {
+        const angle = (i * Math.PI) / 3 + time;
+        const radius = 15;
+        const px = x + Math.cos(angle) * radius;
+        const py = y + Math.sin(angle) * radius;
+        const pulse = Math.sin(time * 4 + i) * 0.5 + 0.5;
+        
+        ctx.globalAlpha = pulse;
+        ctx.fillStyle = '#00FF41';
+        ctx.beginPath();
+        ctx.arc(px, py, 2, 0, 2 * Math.PI);
+        ctx.fill();
+    }
+    
+    ctx.restore();
+}
+
+function drawBlitzerIcon(ctx, x, y) {
+    ctx.save();
+    // Основное тело - желтый ромб
+    const gradient = ctx.createLinearGradient(x-10, y, x+10, y);
+    gradient.addColorStop(0, '#FFD700');
+    gradient.addColorStop(1, '#FFEB3B');
+    
+    ctx.fillStyle = gradient;
+    ctx.shadowColor = '#FFD700';
+    ctx.shadowBlur = 15;
+    ctx.beginPath();
+    ctx.moveTo(x, y-12);
+    ctx.lineTo(x+10, y);
+    ctx.lineTo(x, y+12);
+    ctx.lineTo(x-10, y);
+    ctx.closePath();
+    ctx.fill();
+    
+    // Символ "B" в центре
+    ctx.fillStyle = '#FFFFFF';
+    ctx.shadowBlur = 0;
+    ctx.font = 'bold 14px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('B', x, y);
+    
+    // Электрические разряды
+    const time = performance.now() / 1000;
+    for (let i = 0; i < 4; i++) {
+        const angle = time + i * Math.PI / 2;
+        const pulse = Math.sin(angle * 6) * 0.5 + 0.5;
+        ctx.globalAlpha = pulse;
+        ctx.strokeStyle = '#FFFFFF';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(x + Math.cos(angle) * 8, y + Math.sin(angle) * 8);
+        ctx.lineTo(x + Math.cos(angle) * 16, y + Math.sin(angle) * 16);
+        ctx.stroke();
+    }
+    
+    ctx.restore();
+}
+
+function drawTankIcon(ctx, x, y) {
+    ctx.save();
+    // Основной корпус - серый прямоугольник с градиентом
+    const gradient = ctx.createLinearGradient(x-12, y, x+12, y);
+    gradient.addColorStop(0, '#757575');
+    gradient.addColorStop(1, '#424242');
+    
+    ctx.fillStyle = gradient;
+    ctx.shadowColor = '#757575';
+    ctx.shadowBlur = 8;
+    ctx.fillRect(x-12, y-8, 24, 16);
+    
+    // Символ "T" в центре
+    ctx.fillStyle = '#FFFFFF';
+    ctx.shadowBlur = 0;
+    ctx.font = 'bold 14px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('T', x, y);
+    
+    // Броневые полосы
+    ctx.strokeStyle = '#616161';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x-8, y-4);
+    ctx.lineTo(x+8, y-4);
+    ctx.moveTo(x-8, y+4);
+    ctx.lineTo(x+8, y+4);
+    ctx.stroke();
+    
+    // Светящиеся датчики по углам
+    const time = performance.now() / 1000;
+    const sensors = [
+        {x: x-8, y: y-6}, {x: x+8, y: y-6},
+        {x: x-8, y: y+6}, {x: x+8, y: y+6}
+    ];
+    
+    sensors.forEach((sensor, i) => {
+        const pulse = Math.sin(time * 3 + i) * 0.5 + 0.5;
+        ctx.globalAlpha = pulse;
+        ctx.fillStyle = '#FF1744';
+        ctx.beginPath();
+        ctx.arc(sensor.x, sensor.y, 2, 0, 2 * Math.PI);
+        ctx.fill();
+    });
+    
     ctx.restore();
 }
 
@@ -1024,10 +1320,89 @@ function drawHint(ctx, text) {
     ctx.restore();
 }
 
+// Функции для работы с интерфейсом
+function addGameLog(message, type = 'info') {
+    const timestamp = new Date().toLocaleTimeString();
+    const logEntry = {
+        message: message,
+        type: type,
+        timestamp: timestamp,
+        time: Date.now()
+    };
+    
+    gameLogs.unshift(logEntry);
+    
+    // Ограничиваем количество логов
+    if (gameLogs.length > 50) {
+        gameLogs = gameLogs.slice(0, 50);
+    }
+    
+    updateInterface();
+}
+
+function updateInterface() {
+    // Обновляем статистику
+    const gameTime = Math.floor((Date.now() - gameStats.startTime) / 1000);
+    const minutes = Math.floor(gameTime / 60);
+    const seconds = gameTime % 60;
+    
+    const statsElements = {
+        'game-time': `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`,
+        'hub-level': gameState.hubLevel || 1,
+        'trace-level': Math.floor(gameState.traceLevel || 0),
+        'enemies-killed': gameStats.enemiesKilled,
+        'nodes-captured': gameStats.nodesCaptured
+    };
+    
+    for (const [id, value] of Object.entries(statsElements)) {
+        const element = document.getElementById(id);
+        if (element) element.textContent = value;
+    }
+    
+    // Обновляем логи
+    const logsContent = document.getElementById('logs-content');
+    if (logsContent) {
+        logsContent.innerHTML = gameLogs.map(log => {
+            const color = log.type === 'warning' ? '#ffd600' : 
+                         log.type === 'error' ? '#ff1744' : 
+                         log.type === 'success' ? '#00ff90' : '#fff';
+            return `<div style="color: ${color}; margin-bottom: 2px;">
+                <span style="color: #666;">[${log.timestamp}]</span> ${log.message}
+            </div>`;
+        }).join('');
+    }
+    
+    // Обновляем список врагов
+    const enemyList = document.getElementById('enemy-list');
+    if (enemyList) {
+        const enemyCounts = {};
+        for (const enemy of gameState.enemies) {
+            enemyCounts[enemy.type] = (enemyCounts[enemy.type] || 0) + 1;
+        }
+        
+        enemyList.innerHTML = Object.entries(enemyCounts).map(([type, count]) => {
+            const typeNames = {
+                'hunter': 'Охотник',
+                'patrol': 'Патрульный', 
+                'infector': 'Инфектор',
+                'blitzer': 'Блитцер',
+                'tank': 'Танк'
+            };
+            return `<div style="margin-bottom: 4px; display: flex; align-items: center;">
+                <div class="enemy-icon enemy-${type}"></div>
+                <span>${typeNames[type] || type}: ${count}</span>
+            </div>`;
+        }).join('');
+    }
+}
+
 function render() {
     isRendering = true;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     const time = Date.now();
+    
+    // Обновляем интерфейс
+    updateInterface();
     // Соединения
     for (const id in gameState.nodes) {
         const node = gameState.nodes[id];
@@ -1205,6 +1580,8 @@ function update(dt, now) {
                 node.captureProgress = 0;
                 node.owner = 'player';
                 node.program = null;
+                gameStats.nodesCaptured++;
+                addGameLog(`Нода ${node.id} захвачена игроком`, 'success');
                 if (!godMode) gameState.traceLevel += 5; // Значительный штраф за расширение
                 sound.play('capture_success');
                 if (node.type === 'data_cache') {
@@ -1376,7 +1753,21 @@ function update(dt, now) {
         
         if (spawnableNodes.length > 0) {
             const startNode = spawnableNodes[Math.floor(Math.random() * spawnableNodes.length)];
-            let enemyType = (gameState.traceLevel > 50 || gameState.hubCaptureActive) ? 'hunter' : 'patrol';
+            // Выбираем тип врага на основе trace level и времени игры
+            let enemyType = 'patrol';
+            const gameTime = (Date.now() - gameStats.startTime) / 1000;
+            
+            if (gameState.traceLevel > 100 || gameTime > 300) {
+                // Поздняя игра - появляются сложные враги
+                const types = ['hunter', 'infector', 'blitzer', 'tank'];
+                enemyType = types[Math.floor(Math.random() * types.length)];
+            } else if (gameState.traceLevel > 50 || gameTime > 120) {
+                // Средняя игра - hunter и infector
+                enemyType = Math.random() > 0.5 ? 'hunter' : 'infector';
+            } else if (gameState.traceLevel > 20 || gameTime > 60) {
+                // Ранняя игра - hunter
+                enemyType = 'hunter';
+            }
             let path;
             if (enemyType === 'hunter') {
                 let targets = Object.values(gameState.nodes).filter(n => n.owner === 'player' && n.program?.type === 'miner' || n.type === 'cpu_node');
@@ -1396,6 +1787,16 @@ function update(dt, now) {
             const enemy = new Enemy('e' + gameState.enemyIdCounter++, startNode.id, path, enemyType);
             enemy.lastMove = 0; // таймер движения
             gameState.enemies.push(enemy);
+            
+            // Логируем появление врага
+            const enemyNames = {
+                'hunter': '🦖 Охотник',
+                'patrol': '🕷️ Патрульный',
+                'infector': '🦠 Инфектор',
+                'blitzer': '⚡ Блитцер',
+                'tank': '🛡️ Танк'
+            };
+            addGameLog(`Появился ${enemyNames[enemyType]}`, 'warning');
         }
         gameState.lastEnemySpawn = 0;
     }
@@ -1437,6 +1838,8 @@ function update(dt, now) {
             gameState.traceLevel *= 0.95;
         }
         gameState.dp += 8 * killedEnemies.length; // Уменьшено с 15 до 8
+        gameStats.enemiesKilled += killedEnemies.length;
+        addGameLog(`Убито ${killedEnemies.length} врагов (+${8 * killedEnemies.length} DP)`, 'success');
         for(const enemy of killedEnemies) {
             const node = gameState.nodes[enemy.currentNodeId];
             if (node) visualEffects.enemyExplosions.push({x:node.x, y:node.y, time: now});
@@ -1499,7 +1902,16 @@ function startNewGame() {
     gameState.phase = 'PLAYING';
     lastTimestamp = performance.now();
     uiButtons = {};
-    visualEffects = { sentryShots: [], sentryFlashes: [], enemyExplosions: [] };
+    visualEffects = { sentryShots: [], sentryFlashes: [], enemyExplosions: [], teleportEffects: [], tankRamEffects: [], comboEffects: [] };
+    
+    // Сброс статистики и логов
+    gameStats = {
+        enemiesKilled: 0,
+        nodesCaptured: 0,
+        startTime: Date.now()
+    };
+    gameLogs = [];
+    addGameLog('Новая игра начата', 'success');
 }
 
 // --- SOUND SYSTEM ---
@@ -1509,6 +1921,28 @@ const sound = {
         console.log('[SOUND]', name);
     }
 };
+
+// --- MUSIC SYSTEM ---
+let musicEnabled = false;
+const bgMusic = document.getElementById('bgMusic');
+const musicToggle = document.getElementById('musicToggle');
+
+function toggleMusic() {
+    if (musicEnabled) {
+        bgMusic.pause();
+        musicToggle.textContent = '🎵 ВКЛ';
+        musicEnabled = false;
+    } else {
+        bgMusic.play().catch(e => console.log('Автовоспроизведение заблокировано'));
+        musicToggle.textContent = '🔇 ВЫКЛ';
+        musicEnabled = true;
+    }
+}
+
+// Инициализация управления музыкой
+if (musicToggle) {
+    musicToggle.addEventListener('click', toggleMusic);
+}
 
 // --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ВРАГОВ ---
 function getRandomPath(nodesObj, startId, length = 5) {

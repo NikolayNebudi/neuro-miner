@@ -5,9 +5,166 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Canvas Network System</title>
     <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        /* Технический шрифт для интерфейса */
+        #game-interface {
+            font-family: 'Fira Mono', 'Consolas', 'Courier New', monospace;
+        }
+        
+        /* Увеличенные размеры шрифтов */
+        #game-interface h3 {
+            font-size: 16px !important;
+            font-weight: 700;
+        }
+        
+        #game-interface #stats-content,
+        #game-interface #logs-content,
+        #game-interface #enemy-list,
+        #game-interface #hints-content {
+            font-size: 13px !important;
+            line-height: 1.4 !important;
+        }
+        
+        /* Стили для врагов в интерфейсе */
+        .enemy-icon {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            margin-right: 8px;
+            border-radius: 2px;
+            position: relative;
+        }
+        
+        .enemy-hunter {
+            background: linear-gradient(45deg, #8B0000, #FF1744);
+            box-shadow: 0 0 8px #FF1744;
+        }
+        
+        .enemy-patrol {
+            background: linear-gradient(45deg, #4A148C, #9C27B0);
+            box-shadow: 0 0 8px #9C27B0;
+        }
+        
+        .enemy-infector {
+            background: linear-gradient(45deg, #00FF41, #00E676);
+            box-shadow: 0 0 8px #00FF41;
+        }
+        
+        .enemy-blitzer {
+            background: linear-gradient(45deg, #FFD700, #FFEB3B);
+            box-shadow: 0 0 8px #FFD700;
+        }
+        
+        .enemy-tank {
+            background: linear-gradient(45deg, #424242, #757575);
+            box-shadow: 0 0 8px #757575;
+        }
+        
+        /* Адаптивность для разных экранов */
+        @media (max-width: 1400px) {
+            #canvas {
+                width: 900px !important;
+                height: 600px !important;
+            }
+            #game-interface {
+                width: 250px !important;
+            }
+        }
+        
+        @media (max-width: 1200px) {
+            #canvas {
+                width: 800px !important;
+                height: 500px !important;
+            }
+            #game-interface {
+                width: 220px !important;
+            }
+        }
+        
+        @media (max-width: 1000px) {
+            #game-container {
+                flex-direction: column !important;
+            }
+            #game-area {
+                order: 2;
+            }
+            #game-interface {
+                order: 1;
+                width: 100% !important;
+                height: 200px !important;
+                border-left: none !important;
+                border-bottom: 2px solid #00eaff !important;
+            }
+            #canvas {
+                width: 100% !important;
+                height: 500px !important;
+            }
+        }
+    </style>
 </head>
 <body style="background:#1a2330;">
-    <canvas id="canvas" width="1400" height="1000"></canvas>
+    <!-- Фоновая музыка -->
+    <audio id="bgMusic" loop>
+        <source src="assets/music/track_1.wav" type="audio/wav">
+    </audio>
+    
+    <div id="game-container" style="display: flex; width: 100%; height: 100vh;">
+        <!-- Игровое поле -->
+        <div id="game-area" style="flex: 1; position: relative;">
+            <canvas id="canvas" width="1000" height="700"></canvas>
+        </div>
+        
+        <!-- Интерфейс с логами -->
+        <div id="game-interface" style="width: 280px; background: #232b33; border-left: 2px solid #00eaff; padding: 10px; overflow-y: auto; height: 100vh;">
+            <!-- Управление музыкой -->
+            <div id="music-control" style="margin-bottom: 15px; text-align: center;">
+                <button id="musicToggle" style="background: #00eaff; color: #232b33; border: none; padding: 8px 16px; border-radius: 4px; font-family: 'Fira Mono', monospace; font-weight: 700; cursor: pointer;">
+                    🎵 ВКЛ
+                </button>
+            </div>
+            
+            <!-- Статистика игры -->
+            <div id="game-stats" style="margin-bottom: 15px;">
+                <h3 style="color: #ffd600; margin: 0 0 8px 0; font-size: 16px;">📊 СТАТИСТИКА</h3>
+                <div id="stats-content" style="color: #fff; font-size: 13px; line-height: 1.4;">
+                    <div>⏱️ Время: <span id="game-time">00:00</span></div>
+                    <div>🎯 Hub: <span id="hub-level">1</span></div>
+                    <div>📈 Trace: <span id="trace-level">0</span></div>
+                    <div>💀 Убито: <span id="enemies-killed">0</span></div>
+                    <div>🏗️ Захвачено: <span id="nodes-captured">0</span></div>
+                </div>
+            </div>
+            
+            <!-- Логи событий -->
+            <div id="game-logs" style="margin-bottom: 15px;">
+                <h3 style="color: #ffd600; margin: 0 0 8px 0; font-size: 16px;">📝 ЛОГИ</h3>
+                <div id="logs-content" style="color: #fff; font-size: 13px; line-height: 1.4; max-height: 250px; overflow-y: auto; background: #1a2330; padding: 8px; border-radius: 5px;">
+                    <!-- Логи будут добавляться динамически -->
+                </div>
+            </div>
+            
+            <!-- Информация о врагах -->
+            <div id="enemy-info" style="margin-bottom: 15px;">
+                <h3 style="color: #ffd600; margin: 0 0 8px 0; font-size: 16px;">👾 ВРАГИ</h3>
+                <div id="enemy-list" style="color: #fff; font-size: 13px; line-height: 1.4; max-height: 150px; overflow-y: auto; background: #1a2330; padding: 8px; border-radius: 5px;">
+                    <!-- Список врагов будет обновляться динамически -->
+                </div>
+            </div>
+            
+            <!-- Подсказки -->
+            <div id="game-hints">
+                <h3 style="color: #ffd600; margin: 0 0 8px 0; font-size: 16px;">💡 ПОДСКАЗКИ</h3>
+                <div id="hints-content" style="color: #fff; font-size: 13px; line-height: 1.4; background: #1a2330; padding: 8px; border-radius: 5px;">
+                    <div>• Miner'ы добывают DP</div>
+                    <div>• Sentry защищают</div>
+                    <div>• ANTI.EXE задерживает</div>
+                    <div>• Апгрейды усиливают</div>
+                    <div>• Hub генерирует CPU</div>
+                </div>
+            </div>
+        </div>
+    </div>
 </body>
 <script src="canvas_system.js"></script>
 </html> 
